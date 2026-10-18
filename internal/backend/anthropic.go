@@ -41,7 +41,7 @@ func (a *Anthropic) RunStep(ctx StepContext) (StepResult, error) {
 			Messages:  messages,
 		})
 		if err != nil {
-			return StepResult{}, Errorf("%v", err)
+			return StepResult{}, Wrap(err)
 		}
 		if ctx.OnUsage != nil {
 			if err := ctx.OnUsage(resp.Usage); err != nil {

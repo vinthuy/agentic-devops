@@ -188,6 +188,25 @@ func TestMessagesDoesNotSwallowUnrelatedToolChoiceError(t *testing.T) {
 	}
 }
 
+func TestAPIErrorQuota(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{402, `{"error":"payment required"}`, true},
+		{400, `{"message":"Insufficient Balance"}`, true},
+		{429, `{"message":"rate limit exceeded"}`, false},
+		{500, `{"message":"boom"}`, false},
+	}
+	for _, c := range cases {
+		got := (&APIError{Status: c.status, Body: c.body}).Quota()
+		if got != c.want {
+			t.Errorf("Quota(%d, %q) = %v, 期望 %v", c.status, c.body, got, c.want)
+		}
+	}
+}
+
 func TestAPIErrorUnsupportedToolChoice(t *testing.T) {
 	cases := []struct {
 		status int

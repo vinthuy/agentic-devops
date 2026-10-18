@@ -274,6 +274,12 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 					map[string]any{"error": delivery.RedactText(eerr.Error())}); aerr != nil {
 					return task, aerr
 				}
+				if llm.IsQuota(eerr) {
+					if aerr := o.store.AppendEvent(task.ID, "provider_quota",
+						map[string]any{"error": delivery.RedactText(eerr.Error())}); aerr != nil {
+						return task, aerr
+					}
+				}
 			} else {
 				if uerr := o.recordUsage(task.ID, "triage", o.modelName, est.Usage); uerr != nil {
 					return task, uerr
@@ -343,6 +349,12 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 			"reason": "模型规划失败，降级为静态计划",
 		}); aerr != nil {
 			return task, aerr
+		}
+		if llm.IsQuota(err) {
+			if aerr := o.store.AppendEvent(task.ID, "provider_quota",
+				map[string]any{"error": delivery.RedactText(err.Error())}); aerr != nil {
+				return task, aerr
+			}
 		}
 		plan, err = planning.StaticPlanner{}.Plan(context.Background(), req)
 		planSource = "static_fallback"
@@ -462,6 +474,14 @@ func (o *Orchestrator) codeStep(task store.Task, repo config.RepoConfig) (store.
 		switch {
 		case errors.Is(err, cost.ErrBudgetExceeded):
 			return o.suspend(task, "预算上限已用尽，已停止调用模型")
+		case llm.IsQuota(err):
+			// 账户余额/配额问题与任务内容无关：明确告知，避免被当成代码失败。
+			if aerr := o.store.AppendEvent(task.ID, "provider_quota", map[string]any{
+				"error": delivery.RedactText(err.Error()),
+			}); aerr != nil {
+				return task, aerr
+			}
+			return o.suspend(task, "模型账户余额或配额不足，请充值后 resume")
 		case backend.IsBackendError(err):
 			return o.suspend(task, err.Error())
 		default:

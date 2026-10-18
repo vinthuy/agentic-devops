@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,6 +65,35 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("模型调用失败 HTTP %d: %s", e.Status, e.Body)
+}
+
+// Quota 判断错误是否为账户余额或配额不足。
+//
+// 这类错误与任务内容无关，重试不会成功；必须与“代码没修好”区分开，
+// 否则基准测量和人工排查都会把基础设施问题记成产品失败。
+func (e *APIError) Quota() bool {
+	if e.Status == http.StatusPaymentRequired {
+		return true
+	}
+	lower := strings.ToLower(e.Body)
+	for _, phrase := range []string{
+		"insufficient balance", "insufficient_quota", "quota exceeded",
+		"credit balance", "billing", "payment required",
+	} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsQuota 判断错误链中是否包含余额/配额错误。
+func IsQuota(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Quota()
+	}
+	return false
 }
 
 // UnsupportedToolChoice 判断错误是否为“该端点不支持强制工具调用”。

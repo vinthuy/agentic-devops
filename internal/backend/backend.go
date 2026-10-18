@@ -12,12 +12,24 @@ import (
 // Error 表示可恢复的后端错误（限流、超时、轮数耗尽等），任务应进入 NEEDS_HUMAN。
 type Error struct {
 	Msg string
+	// Cause 保留底层错误（例如 llm.APIError），让上层能区分余额不足等基础设施问题。
+	Cause error
 }
 
 func (e *Error) Error() string { return e.Msg }
 
+func (e *Error) Unwrap() error { return e.Cause }
+
 func Errorf(format string, args ...any) error {
 	return &Error{Msg: fmt.Sprintf(format, args...)}
+}
+
+// Wrap 把底层错误包装成可恢复的后端错误，同时保留错误链。
+func Wrap(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &Error{Msg: err.Error(), Cause: err}
 }
 
 // IsBackendError 判断是否为可恢复的后端错误。

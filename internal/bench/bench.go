@@ -66,15 +66,20 @@ type Outcome struct {
 	CIAttempts     int     `json:"ci_attempts"`
 	Degradations   int     `json:"degradations"`
 	DurationS      float64 `json:"duration_s"`
-	Err            string  `json:"error,omitempty"`
+	// Blocked 表示运行被基础设施问题阻断（如模型余额不足），
+	// 与产品能力无关，不应计入成功率分母。
+	Blocked bool   `json:"blocked,omitempty"`
+	Err     string `json:"error,omitempty"`
 }
 
 // Summary 是基准集的聚合指标。启用 --repeat 时，每个用例会贡献多次 trial，
 // 因此 SuccessRate 是“运行次数”维度的比例，可用来观察模型波动。
 type Summary struct {
-	Trials        int     `json:"trials"`
-	Total         int     `json:"total"`
-	Passed        int     `json:"passed"`
+	Trials int `json:"trials"`
+	Total  int `json:"total"`
+	Passed int `json:"passed"`
+	// Blocked 是因基础设施（余额/配额）未能完成的运行次数。
+	Blocked       int     `json:"blocked"`
 	SuccessRate   float64 `json:"success_rate"`
 	HumanRate     float64 `json:"human_rate"`
 	MeanCostUSD   float64 `json:"mean_cost_usd"`
@@ -301,6 +306,12 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 
 	if events, err := st.ListEvents(task.ID); err == nil {
 		outcome.Degradations = len(report.Degradations(events))
+		for _, e := range events {
+			if e.Type == "provider_quota" {
+				outcome.Blocked = true
+				break
+			}
+		}
 	}
 	return outcome
 }
@@ -314,6 +325,10 @@ func summarize(outcomes []Outcome, caseCount int) Summary {
 	}
 	var fixRounds int
 	for _, o := range outcomes {
+		if o.Blocked {
+			s.Blocked++
+			continue
+		}
 		if o.Passed {
 			s.Passed++
 		}
@@ -323,19 +338,24 @@ func summarize(outcomes []Outcome, caseCount int) Summary {
 		s.TotalCostUSD += o.SpentUSD
 		fixRounds += o.FixAttempts
 	}
-	trials := float64(len(outcomes))
-	s.SuccessRate = float64(s.Passed) / trials
-	s.HumanRate = s.HumanRate / trials
-	s.MeanCostUSD = s.TotalCostUSD / trials
-	s.MeanFixRounds = float64(fixRounds) / trials
+	// 分母只算真正执行过的运行：基础设施阻断不代表产品能力。
+	executed := float64(len(outcomes) - s.Blocked)
+	if executed == 0 {
+		return s
+	}
+	s.SuccessRate = float64(s.Passed) / executed
+	s.HumanRate = s.HumanRate / executed
+	s.MeanCostUSD = s.TotalCostUSD / executed
+	s.MeanFixRounds = float64(fixRounds) / executed
 	return s
 }
 
 // CaseStat 按用例聚合多次运行，用于观察波动。
 type CaseStat struct {
-	ID     string `json:"id"`
-	Runs   int    `json:"runs"`
-	Passed int    `json:"passed"`
+	ID      string `json:"id"`
+	Runs    int    `json:"runs"`
+	Passed  int    `json:"passed"`
+	Blocked int    `json:"blocked,omitempty"`
 }
 
 // ByCase 返回每个用例的通过次数，便于在重复采样下识别不稳定用例。
@@ -348,6 +368,10 @@ func ByCase(outcomes []Outcome) []CaseStat {
 			index[o.ID] = &CaseStat{ID: o.ID}
 			order = append(order, o.ID)
 			stat = index[o.ID]
+		}
+		if o.Blocked {
+			stat.Blocked++
+			continue
 		}
 		stat.Runs++
 		if o.Passed {

@@ -31,6 +31,7 @@ var degradationLabels = map[string]string{
 	"budget_warning":          "花费接近预算上限",
 	"review_failed":           "独立审查执行失败，结果已挂起等待人工",
 	"ci_failed":               "CI 检查失败，已将结果交给自动修复",
+	"provider_quota":          "模型账户余额或配额不足（与任务内容无关）",
 	"secret_scan_failed":      "密钥扫描命中，已阻止推送",
 	"anticheat":               "防作弊检查命中，已转人工",
 }

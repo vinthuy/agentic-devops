@@ -129,6 +129,25 @@ func TestRunManifestRepeatsAndAggregatesByCase(t *testing.T) {
 	}
 }
 
+// 基础设施故障（余额不足）不得计入成功率分母。
+func TestSummarizeExcludesBlockedRuns(t *testing.T) {
+	outcomes := []Outcome{
+		{ID: "a", Run: 1, Status: "DONE", Passed: true},
+		{ID: "b", Run: 1, Status: "NEEDS_HUMAN", Blocked: true},
+	}
+	summary := summarize(outcomes, 2)
+	if summary.Trials != 2 || summary.Blocked != 1 || summary.Passed != 1 {
+		t.Fatalf("汇总异常: %+v", summary)
+	}
+	if summary.SuccessRate != 1 {
+		t.Errorf("分母应排除被阻断的运行，成功率={%v}", summary.SuccessRate)
+	}
+	stats := ByCase(outcomes)
+	if len(stats) != 2 || stats[1].Blocked != 1 || stats[1].Runs != 0 {
+		t.Errorf("按用例统计应标记阻断: %+v", stats)
+	}
+}
+
 // 提交到仓库的清单必须合法，且每个 fixture 目录都存在，避免文档与代码漂移。
 func TestCommittedManifestIsValid(t *testing.T) {
 	root := filepath.Join("..", "..", "bench")

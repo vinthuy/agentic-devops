@@ -1288,7 +1288,10 @@ func benchCmd(opts *options) *cobra.Command {
 			fmt.Fprintln(w, "用例\t轮次\t结果\t级别\t花费\t修复\t审查\tCI\t降级")
 			for _, o := range outcomes {
 				mark := "FAIL"
-				if o.Passed {
+				switch {
+				case o.Blocked:
+					mark = "BLOCKED"
+				case o.Passed:
 					mark = "PASS"
 				}
 				fmt.Fprintf(w, "%s\t%d\t%s\t%s\t$%.4f\t%d\t%d\t%d\t%d\n",
@@ -1310,9 +1313,12 @@ func benchCmd(opts *options) *cobra.Command {
 					return err
 				}
 			}
-			fmt.Fprintf(out, "\n成功率 %d/%d 次运行 = %.0f%%   用例数 %d   人工介入 %.0f%%   平均修复 %.2f 轮   平均花费 $%.4f   总花费 $%.4f\n",
-				summary.Passed, summary.Trials, summary.SuccessRate*100, summary.Total,
+			fmt.Fprintf(out, "\n成功率 %d/%d 次执行 = %.0f%%   用例数 %d   人工介入 %.0f%%   平均修复 %.2f 轮   平均花费 $%.4f   总花费 $%.4f\n",
+				summary.Passed, summary.Trials-summary.Blocked, summary.SuccessRate*100, summary.Total,
 				summary.HumanRate*100, summary.MeanFixRounds, summary.MeanCostUSD, summary.TotalCostUSD)
+			if summary.Blocked > 0 {
+				fmt.Fprintf(out, "[WARN] 另有 %d 次运行被基础设施阻断（模型余额/配额），未计入分母。\n", summary.Blocked)
+			}
 			if minRate > 0 && summary.SuccessRate < minRate {
 				return fail(ExitError, "成功率 %.0f%% 低于门槛 %.0f%%", summary.SuccessRate*100, minRate*100)
 			}

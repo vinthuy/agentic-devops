@@ -28,6 +28,18 @@ func newTools(t *testing.T) (*tools.Runtime, string) {
 	return tools.New(eng, 8000, 60, nil), root
 }
 
+// 余额不足必须能穿过 backend.Error 包装被上层识别，否则会被误记为任务失败。
+func TestWrapPreservesQuotaCause(t *testing.T) {
+	cause := &llm.APIError{Status: 402, Body: `{"message":"Insufficient Balance"}`}
+	wrapped := Wrap(cause)
+	if !llm.IsQuota(wrapped) {
+		t.Error("包装后应仍能识别为余额不足")
+	}
+	if !IsBackendError(wrapped) {
+		t.Error("仍应是可恢复的后端错误")
+	}
+}
+
 func TestUserMessageListsConfiguredCommands(t *testing.T) {
 	rt, root := newTools(t)
 	message := UserMessage(StepContext{Requirement: "check this", Plan: "verify", Worktree: root, Tools: rt})
