@@ -269,7 +269,7 @@ loop（最多 max_turns 轮）:
 2. 检查是否位于 worktree 内
 3. 检查 `deny_paths`（如 `.env*`、`*.pem`、`.git/**`）
 4. 检查 `allowed_paths`（计划中的范围）
-5. 对于 `run_command`：检查命令是否在白名单、是否命中黑名单正则
+5. 对于 `run_command`：检查命令是否在白名单、是否命中黑名单正则；前缀匹配时还要检查**追加参数**里是否含执行类标志（`-exec`、`-toolexec`、`--exec`、`-c`）。精确匹配的整条命令由配置者编写，视为可信
 6. 通过则执行；拒绝则返回结构化错误给模型，并写入 `policy_violations` 表
 
 ### 5.5 验证（Verifying）
@@ -893,6 +893,7 @@ agentic-devops/
 | ADR-24 | 修复上限耗尽时区分主验证与附加断言：`command`/`test` 通过、仅 `grep`/`file_exists` 失败时，归因为“验收标准可能写错” | 统一报“修复次数已达上限” | 基准集中出现 grep 正则写错一个引号、永远无法匹配，但单元测试全部通过的情况。误导性归因会让人以为是代码质量问题。注意：附加断言仍然阻塞交付，只是失败原因如实说明，不降低验证门槛 |
 | ADR-25 | 审批允许替换计划，但写入范围只能收紧 | 允许审批时任意改计划；或完全不允许修改 | 人工修正验收标准是必要的（模型会写出不可执行的检查），但审批也是权限提升的入口——如果允许扩大 `allowed_paths`，审批就变成了绕过策略的通道。因此 `approve --plan` 必须重新通过 `Validate`，且每个新范围都要被原范围覆盖 |
 | ADR-26 | 并发执行采用「一次批量领取 + worker 分发」，worktree 操作进程内串行化 | 每个 worker 循环调用 `NextRunnable`；或引入外部队列/多进程 | SQLite 没有 `SELECT ... FOR UPDATE`，边跑边领取会让两个 worker 拿到同一任务；批量领取后分发可以保证归属唯一。`git worktree add/remove` 会写共享仓库的管理文件，并发调用会踩踏，串行化这几毫秒操作比按仓库维护锁表更简单可靠。退出码按「需要人工 > 一般错误」聚合 |
+| ADR-27 | 前缀白名单只对**追加参数**做危险标志检查；精确匹配的整条命令视为可信 | 一律只做前缀匹配；或只允许完全相等的命令 | 审核中发现：配置 `go test ./...` 后，`go test ./... -exec <任意程序>` 会被前缀匹配放行，而 `-exec` 的作用正是用指定程序执行测试，等于绕过白名单执行任意代码。若改成只允许完全相等，又会让 `-run TestX` 这类正常用法失效。折中：配置者写下的完整命令可信（他要为该命令负责），追加参数才做 `-exec`/`-toolexec`/`--exec`/`-c` 检查 |
 
 ---
 
@@ -1037,7 +1038,7 @@ stateDiagram-v2
 | AC-09 | FR-014 | 审批时可替换计划（修改验收标准或范围），但范围只能收紧 | `TestApproveWithEditedPlan`、`TestVettedPlanFileScopeRules` | 已覆盖 |
 | AC-10 | FR-020 | worktree 基于默认分支创建，且不包含其他分支内容 | `TestCreateWorktreeFromDefaultBranchHead` | 已覆盖 |
 | AC-11 | FR-021 | 每次工具调用可追溯，且事件不含文件正文 | `TestToolCallsAreAuditedWithoutContent`、`TestVerificationAndViolationRecords` | 已覆盖 |
-| AC-12 | FR-022 | 命令经黑/白名单；违规被拒绝并记录 | `TestRunCommandBlocksDangerous`、`TestForbiddenCommands`、`TestDeniedCommandExplainsAllowedCommands`、`TestPolicyViolationsBlockedThenTaskCompletes` | 已覆盖 |
+| AC-12 | FR-022 | 命令经黑/白名单；违规被拒绝并记录；追加参数中的 `-exec`/`-toolexec`/`--exec`/`-c` 被拒绝 | `TestRunCommandBlocksDangerous`、`TestForbiddenCommands`、`TestDeniedCommandExplainsAllowedCommands`、`TestAppendedExecutionFlagsRejected`、`TestExactAllowedCommandIsTrusted`、`TestPolicyViolationsBlockedThenTaskCompletes` | 已覆盖 |
 | AC-13 | FR-023 | 本地受限进程可独立完成任务；Docker 不是前置条件 | `TestRunCommandAllowedRuns` | 已覆盖；Docker 为可选，不纳入验收 |
 | AC-14 | FR-024 | 提交信息包含任务 ID 与 trailer | `TestCommitMessageAndPRBodyContent` | 已覆盖 |
 | AC-15 | FR-025 | `request_info` 不能扩大写入范围；同批次写操作不会先于澄清执行 | `TestWriteOutsidePlannedScopeRejected`、`TestRequestInfoPausesForClarification` | 已覆盖 |
