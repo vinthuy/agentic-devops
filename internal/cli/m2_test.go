@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,61 @@ type stubIssueReader struct {
 func (s *stubIssueReader) Read(_ context.Context, repo string, number int64) (githubIssue, error) {
 	s.repo, s.num = repo, number
 	return s.issue, nil
+}
+
+// G-05：logs 输出完整审计时间线，并支持 --limit 与 --json。
+func TestTaskLogsShowsTimelineAndJSON(t *testing.T) {
+	home := writeHome(t, "not-used")
+	taskID := createTask(t, home)
+	s, err := store.Open(filepath.Join(home, "agentdev.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendEvent(taskID, "tool_call", map[string]any{
+		"tool": "write_file", "path": "hello.txt", "bytes": 6, "ok": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendEvent(taskID, "budget_warning", map[string]any{
+		"spent_usd": 0.8, "budget_usd": 1.0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := invoke(t, "task", "logs", taskID, "--home", home)
+	if code != ExitOK {
+		t.Fatalf("logs 失败 (%d): %s", code, errOut)
+	}
+	for _, want := range []string{"task_created", "tool_call", "budget_warning", "接近预算上限"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("logs 缺少 %q:\n%s", want, out)
+		}
+	}
+
+	code, out, _ = invoke(t, "task", "logs", taskID, "--json", "--home", home)
+	if code != ExitOK {
+		t.Fatalf("logs --json 失败 (%d)", code)
+	}
+	var events []map[string]any
+	if err := json.Unmarshal([]byte(out), &events); err != nil {
+		t.Fatalf("--json 输出不是合法 JSON: %v\n%s", err, out)
+	}
+	if len(events) < 3 {
+		t.Errorf("应输出全部事件，实际 %d", len(events))
+	}
+
+	code, out, _ = invoke(t, "task", "logs", taskID, "--limit", "1", "--home", home)
+	if code != ExitOK || strings.Contains(out, "task_created") {
+		t.Errorf("--limit 1 应只保留最后一条:\n%s", out)
+	}
+
+	code, _, _ = invoke(t, "task", "logs", "t_20260101_abcdef", "--home", home)
+	if code != ExitUsage {
+		t.Errorf("未知任务应为用法错误，实际 %d", code)
+	}
 }
 
 func TestGitHubRepoSlugParsing(t *testing.T) {

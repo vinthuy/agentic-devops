@@ -211,7 +211,7 @@ func doctorCmd(opts *options) *cobra.Command {
 
 func taskCmd(opts *options) *cobra.Command {
 	cmd := &cobra.Command{Use: "task", Short: "任务相关命令"}
-	cmd.AddCommand(taskCreateCmd(opts), taskListCmd(opts), taskStatusCmd(opts),
+	cmd.AddCommand(taskCreateCmd(opts), taskListCmd(opts), taskStatusCmd(opts), taskLogsCmd(opts),
 		taskApproveCmd(opts), taskReplyCmd(opts), taskResumeCmd(opts), taskCancelCmd(opts))
 	return cmd
 }
@@ -547,6 +547,65 @@ func taskStatusCmd(opts *options) *cobra.Command {
 			return w.Flush()
 		},
 	}
+}
+
+// taskLogsCmd 输出完整的审计时间线。与 status 只显示最近 15 条不同，
+// logs 面向事后复盘：默认输出全部事件，可用 --limit 截取尾部。
+func taskLogsCmd(opts *options) *cobra.Command {
+	var (
+		limit  int
+		asJSON bool
+	)
+	cmd := &cobra.Command{
+		Use:   "logs <task-id>",
+		Short: "输出任务事件时间线（审计日志）",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(opts)
+			if err != nil {
+				return err
+			}
+			st, err := openStore(cfg)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			task, err := st.GetTask(args[0])
+			if errors.Is(err, store.ErrNotFound) {
+				return fail(ExitUsage, "%v", err)
+			}
+			if err != nil {
+				return err
+			}
+			events, err := st.ListEvents(task.ID)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if asJSON {
+				encoder := json.NewEncoder(out)
+				encoder.SetIndent("", "  ")
+				return encoder.Encode(events)
+			}
+			if limit > 0 && len(events) > limit {
+				events = events[len(events)-limit:]
+			}
+			fmt.Fprintf(out, "%s  %s  状态 %s  共 %d 条事件\n\n", task.ID, task.Repo, task.Status, len(events))
+			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "时间\t事件\t变化\t详情")
+			for _, e := range events {
+				change := ""
+				if e.ToStatus != "" {
+					change = fmt.Sprintf("%s → %s", orDash(e.FromStatus), e.ToStatus)
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", e.TS, e.Type, change, report.EventDetail(e))
+			}
+			return w.Flush()
+		},
+	}
+	cmd.Flags().IntVar(&limit, "limit", 0, "只显示最后 N 条（0 表示全部）")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "以 JSON 输出事件")
+	return cmd
 }
 
 func orDash(s string) string {

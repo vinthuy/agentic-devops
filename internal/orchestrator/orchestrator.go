@@ -52,6 +52,8 @@ type Orchestrator struct {
 
 	warnedPricing bool
 	warnedBudget  bool
+	// auditErr 记录审计事件写入失败（钩子无法返回错误），由步骤结束后上报。
+	auditErr error
 }
 
 // Option 用于注入可选依赖。
@@ -425,7 +427,9 @@ func (o *Orchestrator) codeStep(task store.Task, repo config.RepoConfig) (store.
 	if err != nil {
 		return task, err
 	}
+	o.auditErr = nil
 	rt := tools.New(pol, o.cfg.Policy.ToolOutputMaxChars, o.cfg.Policy.CommandTimeoutS, o.violationRecorder(task.ID))
+	rt.OnToolCall(o.toolCallRecorder(task.ID))
 
 	res, err := o.backend.RunStep(backend.StepContext{
 		TaskID:         task.ID,
@@ -438,6 +442,10 @@ func (o *Orchestrator) codeStep(task store.Task, repo config.RepoConfig) (store.
 		FailureSummary: failureOf(task, o.store),
 		OnUsage:        o.usageHook(task.ID, "coder"),
 	})
+	// 审计写入失败优先上报：没有工具调用记录就失去可追溯性，不能当作成功。
+	if o.auditErr != nil {
+		return task, o.auditErr
+	}
 	if err != nil {
 		if need, ok := backend.AsInfoNeeded(err); ok {
 			// 模型主动请求澄清：这是正常暂停，不是失败。问题写入 interactions，
@@ -735,7 +743,13 @@ func (o *Orchestrator) deliverStep(task store.Task, repo config.RepoConfig) (sto
 		return o.move(task, state.NeedsHuman,
 			map[string]any{"reason": fmt.Sprintf("远端 %q 不存在，无法推送", repo.Remote)}, shaFields)
 	}
-	if err := delivery.Push(info.Path, repo.Remote, info.Branch); err != nil {
+	if err := delivery.Push(delivery.PushRequest{
+		Worktree:      info.Path,
+		Remote:        repo.Remote,
+		Branch:        info.Branch,
+		Protected:     repo.DefaultBranch,
+		AllowedPrefix: o.cfg.Delivery.BranchPrefix,
+	}); err != nil {
 		return o.move(task, state.NeedsHuman, map[string]any{"reason": err.Error()}, shaFields)
 	}
 	return o.move(task, state.Pushed,
@@ -762,7 +776,7 @@ func (o *Orchestrator) prStep(task store.Task, repo config.RepoConfig) (store.Ta
 		Base:     repo.DefaultBranch,
 		Head:     task.Branch,
 		Title:    prTitle(task),
-		Body:     prBody(o.store, task),
+		Body:     prBody(o.store, o.cfg, task),
 		Draft:    o.cfg.Delivery.DraftPR,
 	})
 	if err != nil {
@@ -961,6 +975,30 @@ func (o *Orchestrator) violationRecorder(taskID string) tools.ViolationHook {
 	}
 }
 
+// toolCallRecorder 把每次工具调用写入事件表，满足“所有工具调用可追溯”（FR-021）。
+// 写入失败不静默吞掉：记录到 auditErr，由本步骤结束后统一上报。
+func (o *Orchestrator) toolCallRecorder(taskID string) tools.ToolCallHook {
+	return func(name string, args map[string]any, ok bool, detail string) {
+		payload := map[string]any{
+			"tool": name, "ok": ok,
+			"detail": delivery.RedactText(detail),
+		}
+		for k, v := range args {
+			if k == "tool" {
+				continue
+			}
+			if s, isString := v.(string); isString {
+				payload[k] = delivery.RedactText(s)
+				continue
+			}
+			payload[k] = v
+		}
+		if err := o.store.AppendEvent(taskID, "tool_call", payload); err != nil && o.auditErr == nil {
+			o.auditErr = fmt.Errorf("写入工具调用审计失败: %w", err)
+		}
+	}
+}
+
 func (o *Orchestrator) ensureWorktree(task store.Task, repo config.RepoConfig) (workspace.Info, error) {
 	if task.WorktreePath != "" {
 		if _, err := os.Stat(task.WorktreePath); err == nil {
@@ -1087,16 +1125,27 @@ func prTitle(task store.Task) string {
 	return fmt.Sprintf("[agentdev] %s", truncateRunes(first, 72))
 }
 
-func prBody(repo store.Repository, task store.Task) string {
+func prBody(repo store.Repository, cfg *config.App, task store.Task) string {
 	var b strings.Builder
+	events, _ := repo.ListEvents(task.ID)
+
 	fmt.Fprintf(&b, "由 agentdev 自动生成的任务 **%s**。\n\n", task.ID)
 	if task.Source == "issue" && task.SourceRef != "" {
-		fmt.Fprintf(&b, "来源：GitHub Issue `%s`\n\n", task.SourceRef)
+		fmt.Fprintf(&b, "来源：GitHub Issue %s\n\n", task.SourceRef)
+	} else {
+		b.WriteString("来源：CLI 需求\n\n")
 	}
+
 	b.WriteString("## 需求\n\n")
 	fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(task.Requirement, "\n", "\n> "))
+
 	if plan, err := planning.Parse(task.PlanJSON); err == nil && plan.Summary != "" {
 		b.WriteString("## 计划\n\n")
+		fmt.Fprintf(&b, "- 来源：%s\n", planSourceLabel(events))
+		if len(plan.Scope.AllowedPaths) > 0 {
+			fmt.Fprintf(&b, "- 允许改动范围：%s\n", strings.Join(plan.Scope.AllowedPaths, ", "))
+		}
+		b.WriteString("\n")
 		fmt.Fprintf(&b, "%s\n\n", plan.Summary)
 		if len(plan.Acceptance) > 0 {
 			b.WriteString("## 验收标准\n\n")
@@ -1106,21 +1155,81 @@ func prBody(repo store.Repository, task store.Task) string {
 			b.WriteString("\n")
 		}
 	}
+
 	if runs, err := repo.ListVerifications(task.ID); err == nil && len(runs) > 0 {
 		last := runs[len(runs)-1]
-		b.WriteString("## 验证\n\n")
-		fmt.Fprintf(&b, "- 第 %d 次验证：通过=%v\n", last.Attempt, last.Passed)
-		if outcomes, ok := last.Report["outcomes"].([]any); ok {
+		b.WriteString("## 验证结果\n\n")
+		if last.Passed {
+			b.WriteString("验证命令与验收标准全部通过。\n\n")
+		} else {
+			b.WriteString("> 注意：验证未通过，本 PR 不应合并。\n\n")
+		}
+		if outcomes, ok := last.Report["outcomes"].([]any); ok && len(outcomes) > 0 {
+			b.WriteString("| 命令 | 退出码 |\n| --- | --- |\n")
 			for _, o := range outcomes {
 				m, _ := o.(map[string]any)
-				fmt.Fprintf(&b, "  - `%v`：退出码 %v\n", m["command"], m["exit_code"])
+				fmt.Fprintf(&b, "| `%v` | %v |\n", m["command"], m["exit_code"])
 			}
+			b.WriteString("\n")
 		}
-		b.WriteString("\n")
+		if acceptance, ok := last.Report["acceptance"].([]any); ok && len(acceptance) > 0 {
+			b.WriteString("| 验收标准 | 结果 |\n| --- | --- |\n")
+			for _, a := range acceptance {
+				m, _ := a.(map[string]any)
+				mark := "未满足"
+				if p, _ := m["passed"].(bool); p {
+					mark = "满足"
+				}
+				fmt.Fprintf(&b, "| [%v] %v | %s |\n", m["id"], m["description"], mark)
+			}
+			b.WriteString("\n")
+		}
 	}
+
+	if s := lastReviewSummary(events); s != "" {
+		fmt.Fprintf(&b, "## 独立审查\n\n%s\n\n", s)
+	}
+
 	fmt.Fprintf(&b, "## 成本\n\n- 预算 $%.2f，已用 $%.4f\n\n", task.BudgetUSD, task.SpentUSD)
+	if cfg != nil {
+		fmt.Fprintf(&b, "运行报告：`%s`\n\n", filepath.Join(cfg.RunsDir(), task.ID, "report.md"))
+	}
 	b.WriteString("本 PR 由自动化流程创建为草稿，**不会自动合并**，请人工审阅后再合并。\n")
 	return b.String()
+}
+
+// planSourceLabel 说明计划来自模型还是静态降级，避免 PR 正文夸大验证强度。
+func planSourceLabel(events []store.Event) string {
+	label := "静态计划"
+	for _, e := range events {
+		if e.Type != "plan_ready" {
+			continue
+		}
+		switch source, _ := e.Payload["source"].(string); source {
+		case "model":
+			label = "模型生成"
+		case "configured_planner":
+			label = "配置的自定义规划器"
+		case "static_fallback":
+			label = "静态降级（模型规划失败，验收标准仅来自验证命令）"
+		}
+	}
+	return label
+}
+
+func lastReviewSummary(events []store.Event) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != "review_result" {
+			continue
+		}
+		decision, _ := events[i].Payload["decision"].(string)
+		summary, _ := events[i].Payload["summary"].(string)
+		if summary == "" {
+			return decision
+		}
+		return fmt.Sprintf("%s：%s", decision, summary)
+	}
+	return ""
 }
 
 func commitMessage(task store.Task) string {

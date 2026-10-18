@@ -970,6 +970,7 @@ stateDiagram-v2
 | `plan_ready` | 规划步骤 | `source`（`model` / `static` / `static_fallback` / `configured_planner`） | 计划来源 | 否 |
 | `plan_failed` | 规划步骤 | `error`、`reason` | 模型规划失败，降级为静态计划 | 是 |
 | `plan_scope_unrestricted` | 规划步骤 | `note` | 计划未限定改动范围 | 是 |
+| `tool_call` | 工具运行时 | `tool`、`path`/`command`/`pattern`、`bytes`、`ok`、`detail` | 每次工具调用的审计记录；不记录文件正文 | 否 |
 | `step_finished` | 编码步骤 | `turns`、用量字段、`summary` | 一次编码循环结束 | 否 |
 | `anticheat` | 验证步骤 | `findings` | 防作弊命中，转人工 | 是 |
 | `fix_requested` | 验证 / 审查 / CI | `attempt`、`source`、`failure` | 回传修复请求 | 否 |
@@ -1006,7 +1007,7 @@ stateDiagram-v2
    go test ./... -count=1     # 全部 ok
    ```
 
-   **当前基线**（2026-10-18，`25252bf`）：178 个测试函数，17 个包全部 `ok`，`gofmt` 无输出。
+   **当前基线**（2026-10-18）：198 个测试函数，17 个包全部 `ok`，`gofmt` 无输出。
 
 ### 21.2 功能验收矩阵
 
@@ -1021,11 +1022,11 @@ stateDiagram-v2
 | AC-07 | FR-011 | 验收标准只接受 `test` / `command` / `file_exists` / `grep`；不安全选择器被拒绝 | `TestValidateRejectsBadPlans`、`TestRunAllRejectsUnsafeSelector` | 已覆盖 |
 | AC-08 | FR-012 | 需求模糊进入 NEEDS_INFO；reply 返回 PLANNING；只允许从 NEEDS_INFO 回复 | `TestNeedsInfoFlowThenReplyResumes`、`TestReplyOnlyFromNeedsInfo` | 已覆盖 |
 | AC-09 | FR-014 | 审批时可修改验收标准或范围 | — | **未实现**（P1，M2 之后） |
-| AC-10 | FR-020 | worktree 基于默认分支创建 | `TestHappyPathCommitsAndWritesReport`（间接） | 部分覆盖：缺少对基线提交等于默认分支 HEAD 的直接断言 |
-| AC-11 | FR-021 | 每次工具调用可追溯 | `TestVerificationAndViolationRecords`（仅覆盖违规记录） | **未覆盖**：没有逐次 `tool_call` 事件，只有违规入库 |
+| AC-10 | FR-020 | worktree 基于默认分支创建，且不包含其他分支内容 | `TestCreateWorktreeFromDefaultBranchHead` | 已覆盖 |
+| AC-11 | FR-021 | 每次工具调用可追溯，且事件不含文件正文 | `TestToolCallsAreAuditedWithoutContent`、`TestVerificationAndViolationRecords` | 已覆盖 |
 | AC-12 | FR-022 | 命令经黑/白名单；违规被拒绝并记录 | `TestRunCommandBlocksDangerous`、`TestForbiddenCommands`、`TestDeniedCommandExplainsAllowedCommands`、`TestPolicyViolationsBlockedThenTaskCompletes` | 已覆盖 |
 | AC-13 | FR-023 | 本地受限进程可独立完成任务；Docker 不是前置条件 | `TestRunCommandAllowedRuns` | 已覆盖；Docker 为可选，不纳入验收 |
-| AC-14 | FR-024 | 提交信息包含任务 ID | `commitMessage` 实现存在，无断言 | **未覆盖** |
+| AC-14 | FR-024 | 提交信息包含任务 ID 与 trailer | `TestCommitMessageAndPRBodyContent` | 已覆盖 |
 | AC-15 | FR-025 | `request_info` 不能扩大写入范围；同批次写操作不会先于澄清执行 | `TestWriteOutsidePlannedScopeRejected`、`TestRequestInfoPausesForClarification` | 已覆盖 |
 | AC-16 | FR-030 | 验证命令按声明顺序执行，首个失败即停止 | `TestVerifierStopsAtFirstFailure`、`TestVerifierPassesAndWritesLog` | 已覆盖 |
 | AC-17 | FR-031 | 输出验收矩阵（每条通过/失败） | `TestRunAllFailsWhenAcceptanceUnmet`、`TestRunAllEvaluatesFileAndGrepChecks`、`TestReportToMapCarriesAcceptance` | 已覆盖 |
@@ -1033,11 +1034,11 @@ stateDiagram-v2
 | AC-19 | FR-033 | 修复次数达到上限进入 NEEDS_HUMAN | `TestFixLimitLeadsToNeedsHuman` | 已覆盖 |
 | AC-20 | FR-034 | Reviewer 结论通过校验；`request_changes` 回编码；超限挂起；审查失败挂起而非回炉 | `TestValidateRejectsInconsistentOrIncompleteVerdicts`、`TestReviewRequestChangesReturnsToCoding`、`TestReviewLimitSuspendsForHuman`、`TestReviewFailureSuspendsInsteadOfRejecting`、`TestOrchestratorValidatesCustomReviewerVerdict` | 已覆盖；审查判断质量仅有一次真实端到端样本 |
 | AC-21 | FR-035 | 修改验证配置、添加跳过标记、删除测试、减少测试数均转人工 | `TestAnticheatFlagsVerifyConfigChange`、`TestAnticheatFlagsAddedSkipMarker`、`TestAnticheatFlagsDeletedTestFile`、`TestAnticheatFlagsReducedTestCount`、`TestTamperingWithVerifyConfigNeedsHuman` | 已覆盖；误报率待基准统计 |
-| AC-22 | FR-040 | 分支名 `agent/<task-id>-<slug>`，推送到远端，不推送默认分支 | `TestDeliveryPushesBranchAndOpensDraftPR`（断言已推送）；默认分支拒绝无测试 | 部分覆盖：缺少“拒绝推送默认分支”测试（见 SEC-07） |
+| AC-22 | FR-040 | 分支名 `agent/<task-id>-<slug>`，推送到远端，拒绝推送默认分支与非预期前缀 | `TestDeliveryPushesBranchAndOpensDraftPR`、`TestPushGuardRejectsProtectedBranches`、`TestCreateWorktreeFromDefaultBranchHead` | 已覆盖 |
 | AC-23 | FR-041 | 同一分支已有 PR 时更新而不重复创建；鉴权失败不被当作“不存在” | `TestGHCliEnsurePRUpdatesExistingInsteadOfCreatingDuplicate`、`TestGHCliEnsurePRCreatesWhenMissing`、`TestGHCliEnsurePRDoesNotTreatAuthFailureAsMissing` | 已覆盖（Runner 替身）；真实 `gh` 待真实环境 |
-| AC-24 | FR-042 | PR 正文包含需求、计划、验收、成本、任务 ID、运行报告路径 | `prBody` 实现存在，无内容断言 | **未覆盖** |
+| AC-24 | FR-042 | PR 正文包含需求、计划来源、验收矩阵、成本、任务 ID、运行报告路径 | `TestCommitMessageAndPRBodyContent` | 已覆盖 |
 | AC-25 | FR-043 | 默认创建 Draft PR | `TestDeliveryPushesBranchAndOpensDraftPR` | 已覆盖 |
-| AC-26 | FR-044 | 来自 Issue 的任务在 PR 正文注明来源 URL | `prBody` 实现存在，无测试 | 未覆盖 |
+| AC-26 | FR-044 | 来自 Issue 的任务在 PR 正文注明来源 URL | `TestCommitMessageAndPRBodyContent` | 已覆盖 |
 | AC-27 | FR-045 | 推送前密钥扫描；命中则阻止推送并转人工 | `TestSecretScanBlocksPush`、`TestScanDiffFindsAddedSecrets`、`TestScanDiffFlagsSensitiveFileNames` | 已覆盖 |
 | AC-28 | FR-046 | CI 监听：通过完成；无 CI 明确记录；失败回修并受上限约束；超时挂起 | `TestCIPassedMarksDone`、`TestCINoneMarksDoneWithExplicitNote`、`TestCIFailedReturnsToCodingAndCounts`、`TestCIExceedingLimitSuspends`、`TestCIPendingTimesOut`、`TestGHCliChecksParsesFailuresAndFetchesLogs`、`TestGHCliChecksUnknownStateIsNotSuccess` | 已覆盖（FakeCI / Runner）；线上 CI 待真实环境 |
 | AC-29 | FR-047 | 任务完成后回写 Issue 评论 | — | **未实现**（P2，M3） |
@@ -1045,7 +1046,7 @@ stateDiagram-v2
 | AC-31 | FR-051 | 任务前给出成本预估 | — | **未实现**（P2） |
 | AC-32 | FR-052 | 80% 记预警，100% 熔断并停止调用模型 | `TestBudgetWarningThenCircuitBreaker`、`TestRepoBudgetDefaultsToTwoDollars`、`TestErrBudgetExceededIsSentinel` | 已覆盖 |
 | AC-33 | FR-053 | 报表按任务、角色、模型汇总 | `TestCostReportAggregatesAcrossTasks` | 部分覆盖：按仓库、按日未实现 |
-| AC-34 | FR-060 | CLI 提供 create / list / status / logs / approve / reply / cancel / resume | `TestTaskListShowsCreated`、`TestCancelStopsTaskAndFreesQueue`、`TestResumeFromNeedsHumanContinues` | **部分**：`logs` 命令未实现 |
+| AC-34 | FR-060 | CLI 提供 create / list / status / logs / approve / reply / cancel / resume | `TestTaskListShowsCreated`、`TestTaskLogsShowsTimelineAndJSON`、`TestCancelStopsTaskAndFreesQueue`、`TestResumeFromNeedsHumanContinues` | 已覆盖（`logs` 支持 `--limit`、`--json`） |
 | AC-35 | FR-061 | 状态转换与关键事件入库，非法转换不改变状态 | `TestCreateTaskWritesQueuedAndEvent`、`TestTransitionUpdatesStatusVersionAndFields`、`TestInvalidTransitionRejectedAndStateUnchanged` | 已覆盖 |
 | AC-36 | FR-062 | 运行报告包含时间线、成本、降级、审查、CI 与提交审计 | `TestReportIncludesCostAndPR`、`TestReportRendersSourceAndDegradationProminently`、`TestReportShowsArtifactAuditAndReviewerDecision` | 已覆盖 |
 | AC-37 | FR-063 | 中断后可 resume；恢复时重置修复、审查、CI 计数 | `TestResumeAfterNeedsHuman`、`TestResumeResetsAllM2AttemptCounters` | 已覆盖；真实进程被杀后的恢复待故障注入测试 |
@@ -1064,7 +1065,7 @@ stateDiagram-v2
 | SEC-04 | 危险命令被拒绝；组合命令、重定向被拒绝 | `TestForbiddenCommands`、`TestRunCommandBlocksDangerous` | 已覆盖 |
 | SEC-05 | Issue、工具输出、CI 日志、Reviewer diff 均在提示中标注为不可信 | `TestTaskCreateImportsIssueAsUntrustedSource`；提示注入样本集未建立 | 部分覆盖 |
 | SEC-06 | 事件、CI 日志、Reviewer 文本中的已知密钥格式被脱敏 | `TestRedactTextHidesKnownSecretFormats` | 已覆盖 |
-| SEC-07 | 任何推送都不能指向默认分支 | 无专门测试（分支前缀由任务生成，实际不会命中默认分支，但缺少断言） | **未覆盖**（必须补测试，见 21.5 G-01） |
+| SEC-07 | 任何推送都不能指向默认分支或非预期前缀 | `TestPushGuardRejectsProtectedBranches`（含 `main`/`master`/配置默认分支/空前缀） | 已覆盖 |
 | SEC-08 | 模型 key 只从环境变量读取，不写入仓库或运行产物 | `TestAnthropicBackendRequiresKey`（读取）；“不落盘”无测试 | 部分覆盖 |
 | SEC-09 | 搜索结果不包含敏感路径与 `.git` 内容 | `TestSearchSkipsDeniedAndGit` | 已覆盖 |
 
@@ -1096,7 +1097,7 @@ stateDiagram-v2
 
 | 里程碑 | 退出标准（PRD §11） | 当前结论 |
 |---|---|---|
-| M1 MVP | 所有 P0 FR 完成；基准集成功率 ≥ 60%；安全测试全部通过 | P0 未全部完成（缺口 G-01 至 G-05，对应 AC-10、AC-11、AC-14、AC-22、AC-24、AC-34、SEC-07）；基准集未建立，成功率未测量；**未达到退出标准** |
+| M1 MVP | 所有 P0 FR 完成；基准集成功率 ≥ 60%；安全测试全部通过 | P0 缺口 G-01 至 G-05 已关闭；安全测试通过。**基准集仍未建立，成功率未测量**，因此仍未满足退出标准（见 G-08） |
 | M2 增强 | Reviewer、CI 闭环、Issue 导入、成本看板、`request_info` 可用；基准集 CI 首次通过率 ≥ 50% | 功能均已实现，自动化测试通过；**CI 首次通过率未测量**，线上 PR/CI 闭环待真实环境验证 |
 | M3 自动化 | Webhook/标签触发、多任务并发、Issue 回写、定时任务 | 未开始（FR-047、FR-064、FR-065 属于此阶段） |
 
@@ -1104,15 +1105,15 @@ stateDiagram-v2
 
 | 编号 | 缺口 | 关联 AC | 处理建议 | 优先级 |
 |---|---|---|---|---|
-| G-01 | 缺少“拒绝推送默认分支”的断言测试 | AC-22、SEC-07 | 在 `delivery` 增加保护检查，并添加测试 | 高（安全） |
-| G-02 | 没有逐次工具调用事件，仅记录违规 | AC-11 | 在 `tools.Execute` 写入 `tool_call` 事件（名称、参数摘要、结果状态），并加测试 | 高 |
-| G-03 | PR 正文与提交信息缺少内容断言 | AC-14、AC-24（P0）、AC-26 | 对 `prBody` 与 `commitMessage` 增加断言测试 | 高（P0：FR-042） |
-| G-04 | worktree 基线未直接断言为默认分支 HEAD | AC-10（P0） | 增加工作区创建测试 | 高（P0：FR-020） |
-| G-05 | `task logs` 命令未实现 | AC-34（P0） | 读取 `events.jsonl` / 事件表输出时间线，支持 `--follow` 可后续再做 | 高（P0：FR-060） |
+| ~~G-01~~ | ~~缺少“拒绝推送默认分支”的断言测试~~ | AC-22、SEC-07 | **已关闭**：`delivery.EnsurePushable`/`PushRequest` 强制校验默认分支与前缀；`TestPushGuardRejectsProtectedBranches` | 已关闭 |
+| ~~G-02~~ | ~~没有逐次工具调用事件，仅记录违规~~ | AC-11 | **已关闭**：`tools.ToolCallHook` 写入 `tool_call` 事件（参数摘要、字节数、状态；脱敏且不含正文）；`TestToolCallsAreAuditedWithoutContent` | 已关闭 |
+| ~~G-03~~ | ~~PR 正文与提交信息缺少内容断言~~ | AC-14、AC-24、AC-26 | **已关闭**：`TestCommitMessageAndPRBodyContent` 断言需求、来源、计划来源、验收矩阵、成本、报告路径与任务 ID；PR 正文新增运行报告路径与计划来源 | 已关闭 |
+| ~~G-04~~ | ~~worktree 基线未直接断言为默认分支 HEAD~~ | AC-10 | **已关闭**：`TestCreateWorktreeFromDefaultBranchHead` 断言基线 SHA、分支前缀且不含其他分支内容 | 已关闭 |
+| ~~G-05~~ | ~~`task logs` 命令未实现~~ | AC-34 | **已关闭**：`task logs <id> [--limit N] [--json]`，复用 `report.EventDetail`；`TestTaskLogsShowsTimelineAndJSON` | 已关闭 |
 | G-06 | 审批时不能修改计划 | AC-09 | 按 FR-014（P1）设计 `approve --plan-edit` 的校验流程 | 低（P1） |
 | G-07 | 没有并发任务上限 | AC-38 | 按 FR-064（P1）增加调度器并发控制 | 低（P1） |
 | G-08 | 没有 20 个 S 级基准任务，成功率、误报率、CI 首次通过率均未测量 | 21.6 | 建立 `tests/benchmarks`（任务描述、初始快照、验收标准），在授权仓库上运行 | 高（产品验证） |
 | G-09 | 线上 Draft PR 与 CI 闭环未在真实远端验证（本次仅完成推送与建仓） | AC-02、AC-23、AC-28、REL-09 | 在授权测试仓库上执行一次完整 PR 与 CI 失败修复闭环，记录结果到 §18 | 高（产品验证） |
 | G-10 | 进程崩溃恢复只有计数与状态测试，没有故障注入 | AC-37、REL 系列 | 添加“中途杀进程后 resume”的脚本化测试 | 中 |
 
-> 结论：当前 41 条功能验收中，已覆盖的占多数；但 M1 退出标准尚未满足（P0 缺口为 G-01 至 G-05），不能以“测试全部通过”代替。关闭这些缺口并完成基准集测量后，再重新评估 M1。
+> 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试）。剩余缺口是产品层面的真实环境验证与基准集测量（G-08、G-09、G-10），仍不能用“测试全部通过”代替。完成基准集后重新评估 M1 退出标准。

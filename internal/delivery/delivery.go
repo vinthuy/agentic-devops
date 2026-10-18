@@ -131,9 +131,49 @@ func RemoteExists(worktree, remote string) (bool, error) {
 	return false, nil
 }
 
-// Push 把当前分支推送到远端并建立追踪关系。
-func Push(worktree, remote, branch string) error {
-	if _, err := workspace.Git(worktree, "push", "--set-upstream", remote, branch); err != nil {
+// PushRequest 描述一次分支推送。
+type PushRequest struct {
+	Worktree string
+	Remote   string
+	Branch   string
+	// Protected 是仓库默认分支名；推送它会被拒绝。
+	Protected string
+	// AllowedPrefix 非空时，分支必须以该前缀开头。
+	AllowedPrefix string
+}
+
+// 常见默认分支名。即使配置里的 default_branch 写错了，也不能把任务改动直接
+// 推到这些分支上。
+var protectedBranchNames = map[string]bool{"main": true, "master": true}
+
+// EnsurePushable 检查分支是否可以推送。
+//
+// 这是最后一道程序侧护栏：Agent 无法调用 git push（命令策略禁止），
+// 但编排器自身也可能因为配置错误而把任务分支算成默认分支。
+func EnsurePushable(req PushRequest) error {
+	branch := strings.TrimSpace(req.Branch)
+	if branch == "" {
+		return errors.New("拒绝推送：分支名为空")
+	}
+	if protectedBranchNames[strings.ToLower(branch)] {
+		return fmt.Errorf("拒绝推送受保护分支 %q", branch)
+	}
+	if protected := strings.TrimSpace(req.Protected); protected != "" &&
+		strings.EqualFold(branch, protected) {
+		return fmt.Errorf("拒绝推送仓库默认分支 %q", branch)
+	}
+	if prefix := req.AllowedPrefix; prefix != "" && !strings.HasPrefix(branch, prefix) {
+		return fmt.Errorf("拒绝推送分支 %q：必须以 %q 开头", branch, prefix)
+	}
+	return nil
+}
+
+// Push 校验并推送分支，同时建立追踪关系。
+func Push(req PushRequest) error {
+	if err := EnsurePushable(req); err != nil {
+		return err
+	}
+	if _, err := workspace.Git(req.Worktree, "push", "--set-upstream", req.Remote, req.Branch); err != nil {
 		return fmt.Errorf("推送分支失败: %w", err)
 	}
 	return nil

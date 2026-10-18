@@ -45,6 +45,7 @@ type Runtime struct {
 	maxOutput   int
 	cmdTimeout  time.Duration
 	onViolation ViolationHook
+	onToolCall  ToolCallHook
 }
 
 func New(p *policy.Engine, maxOutput, commandTimeoutS int, hook ViolationHook) *Runtime {
@@ -155,11 +156,31 @@ func obj(props map[string]any, required ...string) map[string]any {
 	return out
 }
 
-// Execute 分派工具调用。策略拒绝和普通错误都转为 Result 返回给模型，不会中断流程。
+// ToolCallHook 在每次工具调用结束后被调用，用于写入审计事件。
+// args 是经过摘要与脱敏的参数，不含文件正文。
+type ToolCallHook func(name string, args map[string]any, ok bool, detail string)
+
+// OnToolCall 注册工具调用审计钩子。必须在 RunStep 之前设置。
+func (r *Runtime) OnToolCall(hook ToolCallHook) *Runtime {
+	r.onToolCall = hook
+	return r
+}
+
+// Execute 分派工具调用，并记录一次审计事件。
+// 策略拒绝和普通错误都转为 Result 返回给模型，不会中断流程。
 func (r *Runtime) Execute(name string, args map[string]any) Result {
 	if args == nil {
 		args = map[string]any{}
 	}
+	res := r.execute(name, args)
+	if r.onToolCall != nil {
+		r.onToolCall(name, summarizeToolArgs(name, args), res.OK, summarizeToolResult(res))
+	}
+	return res
+}
+
+// execute 是实际的工具分派逻辑。
+func (r *Runtime) execute(name string, args map[string]any) Result {
 	var (
 		content string
 		err     error
@@ -192,6 +213,59 @@ func (r *Runtime) Execute(name string, args map[string]any) Result {
 		return Result{OK: false, Content: err.Error()}
 	}
 	return Result{OK: true, Content: content}
+}
+
+// summarizeToolArgs 生成可审计的参数摘要。
+// 刻意不记录文件正文/替换内容，只记录路径与字节数，避免把代码与潜在密钥写进事件。
+func summarizeToolArgs(name string, args map[string]any) map[string]any {
+	out := map[string]any{"tool": name}
+	switch name {
+	case "read_file", "list_dir":
+		out["path"] = optStr(args, "path", ".")
+	case "search":
+		out["path"] = optStr(args, "path", ".")
+		out["pattern"] = truncateText(optStr(args, "pattern", ""), 200)
+	case "write_file":
+		out["path"] = optStr(args, "path", "")
+		out["bytes"] = len(optStr(args, "content", ""))
+	case "edit_file":
+		out["path"] = optStr(args, "path", "")
+		out["old_bytes"] = len(optStr(args, "old", ""))
+		out["new_bytes"] = len(optStr(args, "new", ""))
+	case "run_command":
+		out["command"] = truncateText(optStr(args, "command", ""), 300)
+	case "request_info":
+		if questions, ok := args["questions"].([]any); ok {
+			out["questions"] = len(questions)
+		}
+	}
+	return out
+}
+
+// summarizeToolResult 只保留状态与首行，不把工具输出（可能含源码）写进事件。
+func summarizeToolResult(res Result) string {
+	if len(res.InfoQuestions) > 0 {
+		return fmt.Sprintf("请求澄清 %d 个问题", len(res.InfoQuestions))
+	}
+	if !res.OK {
+		return truncateText(res.Content, 200)
+	}
+	first := res.Content
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	if strings.TrimSpace(first) == "" {
+		return "ok"
+	}
+	return truncateText(first, 120)
+}
+
+func truncateText(s string, limit int) string {
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	return string(r[:limit]) + "…"
 }
 
 // requestInfo 记录模型请求澄清的问题。执行器会据此立即暂停步骤。
