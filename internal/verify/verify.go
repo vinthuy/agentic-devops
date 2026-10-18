@@ -40,6 +40,32 @@ type AcceptanceOutcome struct {
 	Target      string `json:"target"`
 	Passed      bool   `json:"passed"`
 	Evidence    string `json:"evidence"`
+	// Invalid 表示这条验收标准本身不可执行（例如选择器匹配不到任何测试）。
+	// 这类失败不能靠改代码解决，必须回到规划或转人工，否则会白烧修复轮次。
+	Invalid bool `json:"invalid,omitempty"`
+}
+
+// InvalidAcceptance 返回不可执行的验收标准。
+func (r Report) InvalidAcceptance() []AcceptanceOutcome {
+	var out []AcceptanceOutcome
+	for _, a := range r.Acceptance {
+		if a.Invalid {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// noTestsPattern 匹配“命令执行成功但没有任何测试被选中”的输出。
+// 这类结果不是代码缺陷，而是选择器/测试名写错。
+var noTestsPattern = regexp.MustCompile(
+	`(?i)(ran 0 tests|no tests ran|no tests to run|no test files|no tests found|` +
+		`no matching tests|no tests matched|matched no packages|no packages to test|` +
+		`warning: no tests)`,
+)
+
+func looksLikeNoTests(output string) bool {
+	return noTestsPattern.MatchString(output)
 }
 
 // FailureSummary 返回第一个失败的验收标准或验证命令的摘要，供修复轮次使用。
@@ -69,7 +95,7 @@ func (r Report) ToMap() map[string]any {
 	for _, a := range r.Acceptance {
 		acceptance = append(acceptance, map[string]any{
 			"id": a.ID, "description": a.Description, "target": a.Target,
-			"passed": a.Passed, "evidence": a.Evidence,
+			"passed": a.Passed, "evidence": a.Evidence, "invalid": a.Invalid,
 		})
 	}
 	return map[string]any{"passed": r.Passed, "outcomes": outcomes, "acceptance": acceptance}
@@ -242,6 +268,14 @@ func (v Verifier) checkAcceptance(
 			res.Target = cmd
 			res.Passed = r.Passed
 			res.Evidence = r.Evidence
+			// 选择器没选中任何测试：标准本身写错了，不是代码没修好。
+			// 注意即使退出码为 0 也算无效——某些运行器（如 `go test -run 不存在`）
+			// 会返回成功，但这条检查实际上什么都没验证，属于假通过。
+			if looksLikeNoTests(r.Evidence) {
+				res.Invalid = true
+				res.Passed = false
+				res.Evidence = "选择器未匹配到任何测试（验收标准本身不可执行）\n" + r.Evidence
+			}
 		case planning.CheckFileExists:
 			res.Target = ac.Check.Path
 			_, err := os.Stat(filepath.Join(cwd, filepath.FromSlash(ac.Check.Path)))

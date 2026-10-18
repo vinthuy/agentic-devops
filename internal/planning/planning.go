@@ -213,9 +213,12 @@ func validateRelPath(p string) error {
 
 // Requirement 是规划器的输入。
 type Requirement struct {
-	TaskID      string
-	Source      string
-	Text        string
+	TaskID string
+	Source string
+	Text   string
+	// Feedback 是上一次计划的失败原因（例如验收选择器不可执行）。
+	// 重新规划时提供给模型，避免重复同样的错误。
+	Feedback    string
 	VerifyNames []string
 	Commands    map[string]string
 	RepoSummary string
@@ -244,6 +247,9 @@ func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) 
 	var b strings.Builder
 	source, trusted := requirementTag(req.Source)
 	fmt.Fprintf(&b, "<task_requirement source=\"%s\" trusted=\"%t\">\n%s\n</task_requirement>\n\n", source, trusted, req.Text)
+	if req.Feedback != "" {
+		fmt.Fprintf(&b, "<plan_feedback trusted=\"true\">\n%s\n</plan_feedback>\n\n", req.Feedback)
+	}
 	b.WriteString("<repo_context trusted=\"true\">\n")
 	fmt.Fprintf(&b, "可用的验证命令名: %s\n", strings.Join(req.VerifyNames, ", "))
 	for name, cmd := range req.Commands {

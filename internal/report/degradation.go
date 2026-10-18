@@ -25,6 +25,8 @@ var degradationLabels = map[string]string{
 	"triage_model_failed":     "分级模型调用失败，本次仅按规则分级",
 	"plan_failed":             "模型规划失败，已降级为静态计划（验收标准仅来自验证命令）",
 	"plan_scope_unrestricted": "计划未限定改动范围，写入仅受全局策略约束",
+	"acceptance_invalid":      "验收标准不可执行（选择器未匹配到测试），已回到规划",
+	"plan_replanned":          "计划已重新生成：上一次验收标准不可执行",
 	"cost_pricing_missing":    "缺少模型单价，调用按 $0 计，预算熔断对此无效",
 	"budget_warning":          "花费接近预算上限",
 	"review_failed":           "独立审查执行失败，结果已挂起等待人工",
@@ -115,6 +117,10 @@ func degradationDetail(e store.Event) string {
 			payloadFloat(p, "spent_usd"), payloadFloat(p, "budget_usd"))
 	case "plan_scope_unrestricted":
 		return payloadString(p, "note")
+	case "acceptance_invalid":
+		return truncate(payloadString(p, "reason"), 200)
+	case "plan_replanned":
+		return payloadString(p, "cause")
 	case "secret_scan_failed", "anticheat":
 		if n := len(payloadItems(p, "findings")); n > 0 {
 			return fmt.Sprintf("命中 %d 项，详见事件负载", n)

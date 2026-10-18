@@ -1,0 +1,87 @@
+# 基准集：一组固定的 S 级任务，用于测量端到端成功率、人工介入率、修复轮数与成本。
+#
+# 运行：
+#   agentdev bench --manifest bench/tasks.yaml --backend anthropic
+#   agentdev bench --manifest bench/tasks.yaml --backend anthropic --only py-email-plus
+#   agentdev bench --manifest bench/tasks.yaml --backend anthropic --json
+#
+# 每个用例都会把 fixture 复制到临时目录并重新 git init，因此用例之间互不影响。
+# 需求文本会经过真实分级，ExpectLevel 用于同时检验分级是否落在 S。
+cases:
+  - id: py-email-plus
+    fixture: fixtures/py-email-plus
+    requirement: >-
+      修复 validators.py 中的邮箱校验：带 + 号的地址（例如 alice+news@example.com）
+      目前被误判为无效。期望 plus 标签被接受，同时保持明显非法的地址被拒绝。
+      测试文件已有覆盖该场景的用例，请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: py-slugify
+    fixture: fixtures/py-slugify
+    requirement: >-
+      修复 slug.py 中的 slugify：连续出现的空白和标点目前会产生多个连字符，
+      例如 "Hello,  World!" 得到 "hello---world"。期望任意连续的非字母数字
+      序列只折叠成一个连字符，并去掉首尾连字符。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: py-csv-quote
+    fixture: fixtures/py-csv-quote
+    requirement: >-
+      修复 csvutil.py 中的 quote_field：字段内部包含双引号时没有按 CSV 规则
+      转义（内部引号应写成两个引号），例如 say "hi" 目前输出 "say "hi""。
+      期望输出 "say ""hi"""。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: py-json-default
+    fixture: fixtures/py-json-default
+    requirement: >-
+      修复 config.py 中的 with_defaults：该函数会原地修改调用方传入的 defaults
+      字典，导致调用方的默认配置被污染。期望返回新的合并结果，且不修改任何一个
+      入参。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: go-parse-port
+    fixture: fixtures/go-parse-port
+    requirement: >-
+      修复 port.go 中的 Parse：端口字符串前后带空格时会被 strconv.Atoi 拒绝，
+      例如 " 8080" 返回错误。期望先去掉前后空白再解析，同时继续拒绝 0、
+      负数和大于 65535 的值。请勿修改测试。
+    verify:
+      test: go test ./...
+    verify_config_files:
+      - "*_test.go"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: go-dedupe
+    fixture: fixtures/go-dedupe
+    requirement: >-
+      修复 dedupe.go 中的 Dedupe：函数在去重后额外做了排序，破坏了元素第一次
+      出现的顺序。期望只去重并保持首次出现的顺序，例如 ["b","a","b","c","a"]
+      应得到 ["b","a","c"]。请勿修改测试。
+    verify:
+      test: go test ./...
+    verify_config_files:
+      - "*_test.go"
+    budget_usd: 1.0
+    expect_level: S

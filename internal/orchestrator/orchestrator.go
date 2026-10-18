@@ -316,6 +316,7 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 		TaskID:      task.ID,
 		Source:      task.Source,
 		Text:        task.Requirement,
+		Feedback:    planFeedback(o.store, task.ID),
 		VerifyNames: verifyNames(repo),
 		Commands:    commandMap(repo),
 		RepoSummary: repoSummary(repo.LocalPath),
@@ -514,6 +515,7 @@ func (o *Orchestrator) verifyStep(task store.Task, repo config.RepoConfig) (stor
 	}
 
 	failure := ""
+	var auxFailed []string
 	if len(changes) == 0 {
 		failure = "本步骤未产生任何文件改动，请根据需求完成实际修改。"
 		if err := o.store.RecordVerification(task.ID, task.FixAttempts, false,
@@ -538,13 +540,27 @@ func (o *Orchestrator) verifyStep(task store.Task, repo config.RepoConfig) (stor
 				"acceptance":    len(rep.Acceptance),
 			}, nil)
 		}
+		// 验收标准本身不可执行（选择器匹配不到测试）不是代码缺陷：
+		// 改代码永远修不好它，必须回到规划，且只自动重规划一次。
+		if invalid := rep.InvalidAcceptance(); len(invalid) > 0 {
+			return o.replanForInvalidAcceptance(task, invalid)
+		}
 		failure = rep.FailureSummary()
+		auxFailed = auxiliaryFailures(plan.Acceptance, rep.Acceptance)
 	}
 
 	if task.FixAttempts >= o.cfg.Policy.MaxFixAttempts {
+		reason := "修复次数已达上限"
+		if len(auxFailed) > 0 {
+			// 可执行的主验证（command/test）都过了，只剩 grep/file_exists 这类
+			// 结构断言不满足。改代码往往永远满足不了写死的模式，真实原因更可能是
+			// 验收标准本身写错；如实说明，避免把规划缺陷伪装成代码缺陷。
+			reason = "可执行验证已通过，但附加验收标准未满足（可能是验收标准本身写错，例如 grep 模式过窄）"
+		}
 		return o.move(task, state.NeedsHuman, map[string]any{
-			"reason":       "修复次数已达上限",
+			"reason":       reason,
 			"last_failure": failure,
+			"aux_failed":   auxFailed,
 		}, nil)
 	}
 	task, err = o.move(task, state.Coding, map[string]any{"last_failure": truncateRunes(failure, 2000)},
@@ -559,6 +575,99 @@ func (o *Orchestrator) verifyStep(task store.Task, repo config.RepoConfig) (stor
 		return task, err
 	}
 	return task, nil
+}
+
+// auxiliaryFailures 在“可执行验证全部通过、只剩结构断言未满足”时返回这些断言 ID。
+// command/test 执行真实行为，是主验证；grep/file_exists 只是结构声明，写错时
+// 改代码永远满足不了。返回空表示存在主验证失败，应按普通修复处理。
+func auxiliaryFailures(planned []planning.Acceptance, got []verify.AcceptanceOutcome) []string {
+	kinds := make(map[string]planning.CheckType, len(planned))
+	for _, a := range planned {
+		kinds[a.ID] = a.Check.Type
+	}
+	var aux []string
+	for _, o := range got {
+		if o.Passed {
+			continue
+		}
+		switch kinds[o.ID] {
+		case planning.CheckCommand, planning.CheckTest:
+			return nil
+		case planning.CheckGrep, planning.CheckFileExists:
+			aux = append(aux, o.ID)
+		}
+	}
+	return aux
+}
+
+// planFeedback 从最近一次“验收标准不可执行”事件生成重新规划的反馈。
+func planFeedback(repo store.Repository, taskID string) string {
+	events, err := repo.ListEvents(taskID)
+	if err != nil {
+		return ""
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != "acceptance_invalid" {
+			continue
+		}
+		detail, _ := events[i].Payload["reason"].(string)
+		var lines []string
+		if findings, ok := events[i].Payload["findings"].([]any); ok {
+			for _, f := range findings {
+				m, _ := f.(map[string]any)
+				lines = append(lines, fmt.Sprintf("- [%v] %v → %v",
+					m["id"], m["description"], m["evidence"]))
+			}
+		}
+		if len(lines) == 0 {
+			return detail
+		}
+		return detail + "\n" + strings.Join(lines, "\n")
+	}
+	return ""
+}
+
+// replanForInvalidAcceptance 处理不可执行的验收标准：回到 PLANNING 重新规划一次；
+// 若已经重规划过，说明模型仍给不出可执行的检查，转人工而不是继续烧预算。
+func (o *Orchestrator) replanForInvalidAcceptance(
+	task store.Task, invalid []verify.AcceptanceOutcome,
+) (store.Task, error) {
+	findings := make([]any, 0, len(invalid))
+	for _, a := range invalid {
+		findings = append(findings, map[string]any{
+			"id": a.ID, "description": a.Description,
+			"target": a.Target, "evidence": truncateRunes(a.Evidence, 500),
+		})
+	}
+	payload := map[string]any{
+		"reason":   "验收标准不可执行：选择器未匹配到任何测试",
+		"findings": findings,
+	}
+	if err := o.store.AppendEvent(task.ID, "acceptance_invalid", payload); err != nil {
+		return task, err
+	}
+
+	events, err := o.store.ListEvents(task.ID)
+	if err != nil {
+		return task, err
+	}
+	for _, e := range events {
+		if e.Type != "plan_replanned" {
+			continue
+		}
+		return o.move(task, state.NeedsHuman, map[string]any{
+			"reason":   "重新规划后验收标准仍不可执行，需人工修正计划",
+			"findings": findings,
+		}, nil)
+	}
+	if err := o.store.AppendEvent(task.ID, "plan_replanned", map[string]any{
+		"cause": "acceptance_invalid",
+	}); err != nil {
+		return task, err
+	}
+	return o.move(task, state.Planning, map[string]any{
+		"reason": "验收标准不可执行，已回到规划重新生成",
+	}, nil)
 }
 
 // reviewEnabled 报告是否启用独立审查。没有模型时无从审查，直接跳过。

@@ -1,14 +1,171 @@
 package orchestrator
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"agentdev/internal/backend"
+	"agentdev/internal/config"
 	"agentdev/internal/delivery"
 	"agentdev/internal/planning"
+	"agentdev/internal/state"
+	"agentdev/internal/testutil"
 )
+
+// recordingPlanner 记录每次规划请求，便于断言重新规划时带上了反馈。
+type recordingPlanner struct {
+	plans []planning.Plan
+	reqs  []planning.Requirement
+}
+
+func (p *recordingPlanner) Plan(ctx context.Context, req planning.Requirement) (planning.Plan, error) {
+	p.reqs = append(p.reqs, req)
+	if len(p.plans) == 0 {
+		return planning.StaticPlanner{}.Plan(ctx, req)
+	}
+	plan := p.plans[0]
+	p.plans = p.plans[1:]
+	return plan, nil
+}
+
+func goTestRepo(t *testing.T, f *fixture) {
+	t.Helper()
+	repoPath := t.TempDir()
+	testutil.Git(t, repoPath, "init", "-b", "main")
+	testutil.Git(t, repoPath, "config", "user.name", "test")
+	testutil.Git(t, repoPath, "config", "user.email", "test@example.com")
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(repoPath, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module fixture\n\ngo 1.21\n")
+	write("x_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestOK(t *testing.T) {}\n")
+	testutil.Git(t, repoPath, "add", "-A")
+	testutil.Git(t, repoPath, "commit", "-m", "init")
+	f.repo = repoPath
+	f.cfg.Repos["acme/app"] = config.RepoConfig{
+		LocalPath:      repoPath,
+		DefaultBranch:  "main",
+		Remote:         "origin",
+		VerifyCommands: config.VerifyCommands{{Name: "test", Command: "go test ./..."}},
+		BudgetUSD:      2,
+	}
+}
+
+func invalidPlan(selector string) planning.Plan {
+	return planning.Plan{
+		Status:  planning.StatusReady,
+		Summary: "写文件并运行指定测试",
+		Scope:   planning.Scope{AllowedPaths: []string{"hello.txt"}},
+		Steps:   []planning.Step{{ID: "s1", Description: "写 hello.txt", Files: []string{"hello.txt"}}},
+		Acceptance: []planning.Acceptance{{
+			ID: "ac1", Description: "指定测试通过",
+			Check: planning.Check{Type: planning.CheckTest, Name: "test", Selector: selector},
+		}},
+	}
+}
+
+func validPlan() planning.Plan {
+	return planning.Plan{
+		Status:  planning.StatusReady,
+		Summary: "写文件并运行测试",
+		Scope:   planning.Scope{AllowedPaths: []string{"hello.txt"}},
+		Steps:   []planning.Step{{ID: "s1", Description: "写 hello.txt", Files: []string{"hello.txt"}}},
+		Acceptance: []planning.Acceptance{{
+			ID: "ac1", Description: "测试命令通过",
+			Check: planning.Check{Type: planning.CheckCommand, Name: "test"},
+		}},
+	}
+}
+
+// 主验证通过、只有 grep 断言匹配不到时，应如实归因为“验收标准可能写错”。
+func TestAuxiliaryOnlyFailureReportsPlanIssue(t *testing.T) {
+	f := setup(t)
+	goTestRepo(t, f)
+	task := f.task("S")
+	plan := planning.Plan{
+		Status:  planning.StatusReady,
+		Summary: "写文件并运行测试",
+		Scope:   planning.Scope{AllowedPaths: []string{"hello.txt"}},
+		Steps:   []planning.Step{{ID: "s1", Description: "写 hello.txt", Files: []string{"hello.txt"}}},
+		Acceptance: []planning.Acceptance{
+			{ID: "ac-run", Description: "测试通过", Check: planning.Check{Type: planning.CheckCommand, Name: "test"}},
+			{ID: "ac-grep", Description: "结构断言", Check: planning.Check{
+				Type: planning.CheckGrep, Path: "hello.txt",
+				Pattern: "这个模式永远不会匹配-xyzzy", Expect: "present",
+			}},
+		},
+	}
+	done, err := New(f.st, f.cfg, backend.NewFake([][]backend.ToolCall{good, good, good}),
+		WithPlanner(&recordingPlanner{plans: []planning.Plan{plan}})).RunTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != state.NeedsHuman {
+		t.Fatalf("附加断言始终不满足应挂起，实际 %s", done.Status)
+	}
+	if reason := lastReason(t, f.st, task.ID); !strings.Contains(reason, "可能是验收标准本身写错") {
+		t.Errorf("归因应指向验收标准而非代码: %q", reason)
+	}
+}
+
+// 验收选择器匹配不到测试时，应回到规划并携带反馈，而不是空耗修复轮次。
+func TestInvalidAcceptanceReplansWithFeedback(t *testing.T) {
+	f := setup(t)
+	goTestRepo(t, f)
+	task := f.task("S")
+	planner := &recordingPlanner{plans: []planning.Plan{invalidPlan("-run NoSuchTest"), validPlan()}}
+
+	done, err := New(f.st, f.cfg, backend.NewFake([][]backend.ToolCall{good, good}),
+		WithPlanner(planner)).RunTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != state.Done {
+		t.Fatalf("重新规划后应完成，实际 %s", done.Status)
+	}
+	if len(planner.reqs) < 2 {
+		t.Fatalf("应至少规划两次，实际 %d", len(planner.reqs))
+	}
+	if !strings.Contains(planner.reqs[1].Feedback, "不可执行") {
+		t.Errorf("第二次规划应携带反馈，实际 %q", planner.reqs[1].Feedback)
+	}
+	if len(eventsOfType(t, f.st, task.ID, "acceptance_invalid")) != 1 {
+		t.Error("应记录一次 acceptance_invalid")
+	}
+	if done.FixAttempts != 0 {
+		t.Errorf("不可执行的验收标准不应消耗修复次数，实际 %d", done.FixAttempts)
+	}
+}
+
+// 重新规划后仍不可执行时，应转人工而不是无限重规划。
+func TestInvalidAcceptanceAfterReplanSuspends(t *testing.T) {
+	f := setup(t)
+	goTestRepo(t, f)
+	task := f.task("S")
+
+	done, err := New(f.st, f.cfg, backend.NewFake([][]backend.ToolCall{good, good, good}),
+		WithPlanner(&recordingPlanner{plans: []planning.Plan{
+			invalidPlan("-run NoSuchTest"), invalidPlan("-run StillMissing"),
+		}})).RunTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != state.NeedsHuman {
+		t.Fatalf("仍不可执行时应挂起，实际 %s", done.Status)
+	}
+	if reason := lastReason(t, f.st, task.ID); !strings.Contains(reason, "仍不可执行") {
+		t.Errorf("挂起原因应说明验收标准仍不可执行: %q", reason)
+	}
+	if len(eventsOfType(t, f.st, task.ID, "plan_replanned")) != 1 {
+		t.Error("只应自动重规划一次")
+	}
+}
 
 // G-01：推送前必须拒绝默认分支与非预期前缀。
 func TestPushGuardRejectsProtectedBranches(t *testing.T) {

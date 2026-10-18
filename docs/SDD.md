@@ -142,7 +142,9 @@
 | CODING | 策略拦截 / 工具错误次数超限 | NEEDS_HUMAN | — |
 | VERIFYING | 全部通过 | REVIEWING（启用且有模型）或 COMMITTING | — |
 | VERIFYING | 失败, 修复次数 < 上限 | CODING | 回传失败摘要 |
-| VERIFYING | 失败, 修复次数 ≥ 上限 | NEEDS_HUMAN | — |
+| VERIFYING | 失败, 修复次数 ≥ 上限 | NEEDS_HUMAN | 若主验证通过、仅附加断言失败，归因为“验收标准可能写错” |
+| VERIFYING | 验收标准不可执行（选择器匹配不到测试） | PLANNING | 记录 `acceptance_invalid`，携带反馈重新规划；只自动重规划一次 |
+| VERIFYING | 重新规划后仍不可执行 | NEEDS_HUMAN | 记录 `acceptance_invalid`，转人工修正计划 |
 | REVIEWING | 通过 | COMMITTING | — |
 | REVIEWING | 不通过, `review_attempts` < 上限 | CODING | 回传审查意见并递增审查修复计数 |
 | REVIEWING | 不通过, 已达上限 | NEEDS_HUMAN | 保存最后意见 |
@@ -884,6 +886,8 @@ agentic-devops/
 | ADR-20 | Reviewer 只因需求、正确性、安全、验证完整性问题阻塞；接口失败则挂起人工 | 风格检查打回；Reviewer 失败时自动回炉 | Reviewer 是独立质量闸门，不是第二个编码模型的偏好投票；可验证 finding 才能驱动代码修改，避免模型故障造成无谓 diff |
 | ADR-21 | PR 交付使用 `EnsurePR`：按 head 查已有 PR，存在则 edit，不存在才 create | 每轮失败修复都创建新 PR | CI 失败回到 CODING 后，必须继续更新同一个 PR；鉴权/网络错误不得误判为 PR 不存在 |
 | ADR-22 | CI 查询只返回当前快照，由状态机按配置轮询；“无 checks”是独立结果，不等同于通过 | 让 `gh pr checks --watch` 阻塞单次命令；把空结果当成功 | 任务状态、超时与恢复仍由持久化状态机掌管；无 CI 必须在事件/报告中明确披露，避免把未执行的验证说成通过 |
+| ADR-23 | 验收标准不可执行时回到规划（自动一次），而非消耗代码修复轮次 | 当成普通验证失败反复改代码；直接悄悄跳过该标准 | 基准集首次运行中，模型凭空编造了不存在的测试选择器（`python -m unittest` 也不支持 pytest 的 `::` 语法），代码明明是正确修复，却烧完 3 次预算报“修复次数已达上限”。不可执行的检查改代码永远满足不了，必须区分“计划缺陷”与“代码缺陷”。自动重规划有界（一次），之后转人工 |
+| ADR-24 | 修复上限耗尽时区分主验证与附加断言：`command`/`test` 通过、仅 `grep`/`file_exists` 失败时，归因为“验收标准可能写错” | 统一报“修复次数已达上限” | 基准集中出现 grep 正则写错一个引号、永远无法匹配，但单元测试全部通过的情况。误导性归因会让人以为是代码质量问题。注意：附加断言仍然阻塞交付，只是失败原因如实说明，不降低验证门槛 |
 
 ---
 
@@ -891,7 +895,8 @@ agentic-devops/
 
 | 项 | 当前状态 / 下一步 |
 |---|---|
-| 真实 GitHub CI 首次通过率 | 目标 ≥50% 尚未测量；需要授权目标仓库、真实 Draft PR 与基准任务集 |
+| 真实 GitHub CI 首次通过率 | 目标 ≥50% 尚未测量；需要授权目标仓库与真实 Draft PR。本地基准集已可运行，但未接真实 CI |
+| 基准集规模 | 已建立 `bench/` 与 6 个 S 级用例（Python + Go），PRD 目标是 20 个；扩样后成功率才有统计意义 |
 | 真实 push/CI 失败修复 | 代码路径与 Fake/Gh Runner 测试已覆盖；当前开发仓库没有配置 remote，未宣称线上闭环验证 |
 | Docker 容器后端 | 可选增强，不是本地开发或 M2 执行的前置条件；只有需要更强隔离时才排期 |
 | Linux 服务器兼容性 | Go 代码跨平台，但当前主要验证环境是 Windows；Linux 子进程、路径和 gh 行为需 CI 验证 |
@@ -970,6 +975,8 @@ stateDiagram-v2
 | `plan_ready` | 规划步骤 | `source`（`model` / `static` / `static_fallback` / `configured_planner`） | 计划来源 | 否 |
 | `plan_failed` | 规划步骤 | `error`、`reason` | 模型规划失败，降级为静态计划 | 是 |
 | `plan_scope_unrestricted` | 规划步骤 | `note` | 计划未限定改动范围 | 是 |
+| `acceptance_invalid` | 验证步骤 | `reason`、`findings` | 验收标准不可执行（选择器匹配不到测试） | 是 |
+| `plan_replanned` | 验证步骤 | `cause` | 已回到规划重新生成计划 | 是 |
 | `tool_call` | 工具运行时 | `tool`、`path`/`command`/`pattern`、`bytes`、`ok`、`detail` | 每次工具调用的审计记录；不记录文件正文 | 否 |
 | `step_finished` | 编码步骤 | `turns`、用量字段、`summary` | 一次编码循环结束 | 否 |
 | `anticheat` | 验证步骤 | `findings` | 防作弊命中，转人工 | 是 |
@@ -1019,7 +1026,8 @@ stateDiagram-v2
 | AC-04 | FR-004 | L 级 REJECTED 且不调用后端；M 级停在 AWAITING_APPROVAL | `TestLevelLRejectedWithoutRunningBackend`、`TestLevelMParksForApproval` | 已覆盖 |
 | AC-05 | FR-013 | S 级无需审批；M 级审批前不进入编码 | `TestMLevelTaskRequiresApprovalThenRuns`、`TestApproveRejectsWrongState` | 已覆盖 |
 | AC-06 | FR-010 | 计划为结构化对象，通过 `Validate`，模型输出经强制工具调用解析 | `TestValidateAcceptsWellFormedPlan`、`TestModelPlannerParsesForcedToolCall`、`TestParseAndPromptText` | 已覆盖 |
-| AC-07 | FR-011 | 验收标准只接受 `test` / `command` / `file_exists` / `grep`；不安全选择器被拒绝 | `TestValidateRejectsBadPlans`、`TestRunAllRejectsUnsafeSelector` | 已覆盖 |
+| AC-07 | FR-011 | 验收标准只接受 `test` / `command` / `file_exists` / `grep`；不安全选择器被拒绝；匹配不到测试的选择器被标记为不可执行并回到规划 | `TestValidateRejectsBadPlans`、`TestRunAllRejectsUnsafeSelector`、`TestRunAllMarksSelectorMatchingNoTestsAsInvalid`、`TestInvalidAcceptanceReplansWithFeedback`、`TestInvalidAcceptanceAfterReplanSuspends` | 已覆盖 |
+| AC-07b | FR-011 | 主验证通过、仅附加断言（grep/file_exists）失败时，归因为验收标准可能写错，而非代码缺陷 | `TestAuxiliaryOnlyFailureReportsPlanIssue` | 已覆盖 |
 | AC-08 | FR-012 | 需求模糊进入 NEEDS_INFO；reply 返回 PLANNING；只允许从 NEEDS_INFO 回复 | `TestNeedsInfoFlowThenReplyResumes`、`TestReplyOnlyFromNeedsInfo` | 已覆盖 |
 | AC-09 | FR-014 | 审批时可修改验收标准或范围 | — | **未实现**（P1，M2 之后） |
 | AC-10 | FR-020 | worktree 基于默认分支创建，且不包含其他分支内容 | `TestCreateWorktreeFromDefaultBranchHead` | 已覆盖 |
@@ -1097,7 +1105,7 @@ stateDiagram-v2
 
 | 里程碑 | 退出标准（PRD §11） | 当前结论 |
 |---|---|---|
-| M1 MVP | 所有 P0 FR 完成；基准集成功率 ≥ 60%；安全测试全部通过 | P0 缺口 G-01 至 G-05 已关闭；安全测试通过。**基准集仍未建立，成功率未测量**，因此仍未满足退出标准（见 G-08） |
+| M1 MVP | 所有 P0 FR 完成；基准集成功率 ≥ 60%；安全测试全部通过 | P0 缺口 G-01 至 G-05 已关闭；安全测试通过；6 个用例实测成功率 83%（≥60%）。但样本量未达 PRD 的 20 个，**尚不能认定为满足退出标准**（见 G-08） |
 | M2 增强 | Reviewer、CI 闭环、Issue 导入、成本看板、`request_info` 可用；基准集 CI 首次通过率 ≥ 50% | 功能均已实现，自动化测试通过；**CI 首次通过率未测量**，线上 PR/CI 闭环待真实环境验证 |
 | M3 自动化 | Webhook/标签触发、多任务并发、Issue 回写、定时任务 | 未开始（FR-047、FR-064、FR-065 属于此阶段） |
 
@@ -1112,8 +1120,67 @@ stateDiagram-v2
 | ~~G-05~~ | ~~`task logs` 命令未实现~~ | AC-34 | **已关闭**：`task logs <id> [--limit N] [--json]`，复用 `report.EventDetail`；`TestTaskLogsShowsTimelineAndJSON` | 已关闭 |
 | G-06 | 审批时不能修改计划 | AC-09 | 按 FR-014（P1）设计 `approve --plan-edit` 的校验流程 | 低（P1） |
 | G-07 | 没有并发任务上限 | AC-38 | 按 FR-064（P1）增加调度器并发控制 | 低（P1） |
-| G-08 | 没有 20 个 S 级基准任务，成功率、误报率、CI 首次通过率均未测量 | 21.6 | 建立 `tests/benchmarks`（任务描述、初始快照、验收标准），在授权仓库上运行 | 高（产品验证） |
+| G-08 | 基准集只有 6 个 S 级用例（目标 20），CI 首次通过率仍未测量 | 21.6 | **部分关闭**：`bench/` + `agentdev bench` 已可复现运行并输出成功率/成本/修复轮数（见 §22）；继续扩样到 20 个，并接入真实 CI | 高（产品验证） |
 | G-09 | 线上 Draft PR 与 CI 闭环未在真实远端验证（本次仅完成推送与建仓） | AC-02、AC-23、AC-28、REL-09 | 在授权测试仓库上执行一次完整 PR 与 CI 失败修复闭环，记录结果到 §18 | 高（产品验证） |
 | G-10 | 进程崩溃恢复只有计数与状态测试，没有故障注入 | AC-37、REL 系列 | 添加“中途杀进程后 resume”的脚本化测试 | 中 |
 
-> 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试）。剩余缺口是产品层面的真实环境验证与基准集测量（G-08、G-09、G-10），仍不能用“测试全部通过”代替。完成基准集后重新评估 M1 退出标准。
+> 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试），并新增 AC-07b 覆盖“验收标准本身写错”的归因。基准集已建立并测得 6 个用例 83% 的成功率（见 §22），但样本量未达 20，CI 首次通过率仍未测量，不能据此宣称 M1 退出标准达成。
+
+---
+
+## 22. 基准集与测量方法
+
+### 22.1 工具
+
+`agentdev bench --manifest bench/tasks.yaml [--only ID] [--json] [--keep]`：
+
+1. 读取 YAML 清单，校验 id 唯一、fixture/requirement/verify 齐备。
+2. 每个用例把 `bench/fixtures/<id>` 复制到独立临时目录并**重新 `git init`**，保证每次基线一致、用例之间零污染。
+3. 用真实状态机跑完整流程（分级 → 规划 → 编码 → 验证 → 审查 → 提交），不设置 `--level` 覆盖，因此同时检验分级是否落在 S。
+4. 输出 PASS/FAIL、级别、花费、修复/审查/CI 次数、降级数量，以及成功率、人工介入率、平均修复轮数、平均花费。
+
+用例通过的定义：最终状态 `DONE`、无运行错误、分级与 `expect_level` 一致。人工介入率统计 `NEEDS_HUMAN` 与运行错误。
+
+### 22.2 当前用例（6）
+
+| 用例 | 语言 | 缺陷类型 | 验证 |
+|---|---|---|---|
+| `py-email-plus` | Python | 正则漏掉 `+` 号 | `python -m unittest -q` |
+| `py-slugify` | Python | 连续分隔符未折叠 | `python -m unittest -q` |
+| `py-csv-quote` | Python | 内部引号未转义 | `python -m unittest -q` |
+| `py-json-default` | Python | 原地修改调用方字典 | `python -m unittest -q` |
+| `go-parse-port` | Go | 未 trim 前后空白 | `go test ./...` |
+| `go-dedupe` | Go | 去重后错误排序 | `go test ./...` |
+
+6 个 fixture 在修复前均确认失败（`FAILED (failures=1)` / `--- FAIL`），因此不是“空跑也通过”的假基准。
+
+### 22.3 首次测量结果（真实 DeepSeek）
+
+| 用例 | 结果 | 级别 | 花费 | 修复 |
+|---|---|---|---|---|
+| py-email-plus | PASS | S | $0.0085 | 0 |
+| py-slugify | PASS | S | $0.0173 | 0 |
+| py-csv-quote | FAIL | S | $0.0282 | 3 |
+| py-json-default | PASS | S | $0.0114 | 0 |
+| go-parse-port | PASS | S | $0.0108 | 0 |
+| go-dedupe | PASS | S | $0.0082 | 0 |
+
+- 成功率 **5/6 = 83%**（目标 ≥60%，但样本仅 6 个，不能等同于 PRD 的 20 任务基准）
+- 人工介入率 **17%**
+- 平均修复轮数 **0.50**，平均花费 **$0.0141**，总花费 **$0.0845**
+- 所有用例均被正确分级为 S
+
+### 22.4 测量暴露的问题（已修复）
+
+| 问题 | 现象 | 修复 |
+|---|---|---|
+| 选择器不可执行 | 模型编造 `test_config.py::TestWithDefaults::test_does_not_mutate_defaults`；`python -m unittest` 也不支持 `::`。代码已正确修复，却反复失败 | 检测“未匹配到任何测试”（含退出码为 0 的假通过），标记 `Invalid`，回到 `PLANNING` 并携带反馈；只自动重规划一次（ADR-23） |
+| 附加断言不可满足 | grep 正则少一个引号，永远匹配不到；单元测试全过 | 主验证通过、仅 `grep`/`file_exists` 失败时，如实归因为“验收标准可能写错”（ADR-24）；仍阻塞交付，不降低门槛 |
+
+修复后 `py-json-default` 由 `NEEDS_HUMAN` 变为 `DONE`。`py-csv-quote` 的归因已修正，但该用例仍需在扩样时复测（同一 fixture 在不同运行中一次通过、一次失败，说明规划质量存在波动）。
+
+### 22.5 扩样与局限
+
+- 当前 6 个用例，PRD 目标是 20 个，且应分布在 2–3 个技术栈；扩样前成功率不具备统计意义。
+- 基准只覆盖本地验证与审查，不含真实 GitHub 推送与 CI；`ci_watch` 路径仍由 FakeCI 与 Runner 替身覆盖。
+- 每个用例只跑一次，未做重复采样，因此无法区分模型波动与真实能力差异。

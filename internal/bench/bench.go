@@ -1,0 +1,382 @@
+// Package bench 提供可复现的基准集运行器。
+//
+// 目标（PRD §10）：用一组固定的 S 级任务测量端到端成功率、人工介入率、修复轮数与成本，
+// 而不是用零散的临时仓库“感觉能跑”。每个用例都在独立的临时目录中从 fixture 重建
+// git 仓库，因此结果不受上一次运行的残留影响。
+package bench
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"agentdev/internal/backend"
+	"agentdev/internal/config"
+	"agentdev/internal/cost"
+	"agentdev/internal/llm"
+	"agentdev/internal/orchestrator"
+	"agentdev/internal/report"
+	"agentdev/internal/review"
+	"agentdev/internal/state"
+	"agentdev/internal/store"
+	"agentdev/internal/workspace"
+)
+
+// Case 是基准集中的一个任务。
+type Case struct {
+	ID string `yaml:"id"`
+	// Fixture 是相对 manifest 所在目录的模板目录。运行时会被复制并重新 git init。
+	Fixture string `yaml:"fixture"`
+	// Requirement 是提交给流水线的自然语言需求。
+	Requirement string `yaml:"requirement"`
+	// Verify 是仓库的验证命令（名称 -> 命令），按声明顺序执行。
+	Verify map[string]string `yaml:"verify"`
+	// VerifyConfigFiles 是防作弊保护的文件（可选）。
+	VerifyConfigFiles []string `yaml:"verify_config_files"`
+	BudgetUSD         float64  `yaml:"budget_usd"`
+	// ExpectLevel 非空时校验分级结果（S/M/L）。
+	ExpectLevel string `yaml:"expect_level"`
+}
+
+// Manifest 是基准集清单。
+type Manifest struct {
+	Cases []Case `yaml:"cases"`
+}
+
+// Outcome 是单个用例的运行结果。
+type Outcome struct {
+	ID             string  `json:"id"`
+	Status         string  `json:"status"`
+	Level          string  `json:"level"`
+	ExpectLevel    string  `json:"expect_level,omitempty"`
+	LevelMatched   bool    `json:"level_matched"`
+	Passed         bool    `json:"passed"`
+	SpentUSD       float64 `json:"spent_usd"`
+	FixAttempts    int     `json:"fix_attempts"`
+	ReviewAttempts int     `json:"review_attempts"`
+	CIAttempts     int     `json:"ci_attempts"`
+	Degradations   int     `json:"degradations"`
+	DurationS      float64 `json:"duration_s"`
+	Err            string  `json:"error,omitempty"`
+}
+
+// Summary 是基准集的聚合指标。
+type Summary struct {
+	Total         int     `json:"total"`
+	Passed        int     `json:"passed"`
+	SuccessRate   float64 `json:"success_rate"`
+	HumanRate     float64 `json:"human_rate"`
+	MeanCostUSD   float64 `json:"mean_cost_usd"`
+	MeanFixRounds float64 `json:"mean_fix_rounds"`
+	TotalCostUSD  float64 `json:"total_cost_usd"`
+}
+
+// ModelConfig 非 nil 时启用模型分级、规划与审查，并记录费用。
+type ModelConfig struct {
+	Client    *llm.Client
+	Model     string
+	MaxTokens int
+	Pricing   cost.Table
+}
+
+// Options 控制一次基准运行。
+type Options struct {
+	// BackendFor 为每个用例返回一个全新的执行后端（Fake 脚本不应跨用例泄漏）。
+	BackendFor func(Case) (backend.ExecutionBackend, error)
+	Model      *ModelConfig
+	// Reviewer 覆盖默认 Reviewer（测试用）。
+	Reviewer review.Reviewer
+	// WorkDir 是临时目录根；为空时使用系统临时目录。每个用例在起下面独占一个子目录。
+	WorkDir string
+	// Keep 为 true 时保留临时目录，便于排查失败用例。
+	Keep bool
+	// Log 接收逐用例进度输出，可为 nil。
+	Log io.Writer
+}
+
+// Load 读取并校验 manifest。
+func Load(path string) (Manifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Manifest{}, err
+	}
+	var m Manifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		return Manifest{}, fmt.Errorf("解析基准清单失败: %w", err)
+	}
+	if len(m.Cases) == 0 {
+		return Manifest{}, fmt.Errorf("基准清单为空: %s", path)
+	}
+	seen := map[string]bool{}
+	for i, c := range m.Cases {
+		if c.ID == "" {
+			return Manifest{}, fmt.Errorf("第 %d 个用例缺少 id", i+1)
+		}
+		if seen[c.ID] {
+			return Manifest{}, fmt.Errorf("用例 id 重复: %s", c.ID)
+		}
+		seen[c.ID] = true
+		if c.Fixture == "" {
+			return Manifest{}, fmt.Errorf("%s: 缺少 fixture", c.ID)
+		}
+		if strings.TrimSpace(c.Requirement) == "" {
+			return Manifest{}, fmt.Errorf("%s: 缺少 requirement", c.ID)
+		}
+		if len(c.Verify) == 0 {
+			return Manifest{}, fmt.Errorf("%s: 缺少 verify 命令", c.ID)
+		}
+	}
+	return m, nil
+}
+
+// Run 读取清单并运行全部用例。
+func Run(ctx context.Context, manifestPath string, opts Options) (Summary, []Outcome, error) {
+	manifest, err := Load(manifestPath)
+	if err != nil {
+		return Summary{}, nil, err
+	}
+	return RunManifest(ctx, filepath.Dir(manifestPath), manifest, opts)
+}
+
+// RunManifest 运行给定的清单。manifestDir 用于解析 fixture 相对路径。
+func RunManifest(ctx context.Context, manifestDir string, manifest Manifest, opts Options) (Summary, []Outcome, error) {
+	baseDir := opts.WorkDir
+	var err error
+	if baseDir == "" {
+		baseDir, err = os.MkdirTemp("", "agentdev-bench-*")
+		if err != nil {
+			return Summary{}, nil, err
+		}
+	} else if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return Summary{}, nil, err
+	}
+	if !opts.Keep && opts.WorkDir == "" {
+		defer os.RemoveAll(baseDir)
+	}
+
+	var outcomes []Outcome
+	for _, c := range manifest.Cases {
+		outcome := runCase(ctx, manifestDir, baseDir, c, opts)
+		outcomes = append(outcomes, outcome)
+		if opts.Log != nil {
+			fmt.Fprintf(opts.Log, "[%s] %s 级别=%s 花费=$%.4f 时长=%.1fs\n",
+				outcome.Status, outcome.ID, orDash(outcome.Level), outcome.SpentUSD, outcome.DurationS)
+			if outcome.Err != "" {
+				fmt.Fprintf(opts.Log, "  错误: %s\n", outcome.Err)
+			}
+		}
+	}
+	return summarize(outcomes), outcomes, nil
+}
+
+func runCase(ctx context.Context, manifestDir, baseDir string, c Case, opts Options) Outcome {
+	started := time.Now()
+	outcome := Outcome{ID: c.ID, ExpectLevel: c.ExpectLevel}
+
+	work := filepath.Join(baseDir, c.ID)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		outcome.Err = err.Error()
+		outcome.Status = "ERROR"
+		return outcome
+	}
+	repoDir := filepath.Join(work, "repo")
+	if err := copyFixture(filepath.Join(manifestDir, c.Fixture), repoDir); err != nil {
+		outcome.Err = "复制 fixture 失败: " + err.Error()
+		outcome.Status = "ERROR"
+		return outcome
+	}
+	if err := initRepo(repoDir); err != nil {
+		outcome.Err = "初始化仓库失败: " + err.Error()
+		outcome.Status = "ERROR"
+		return outcome
+	}
+
+	home := filepath.Join(work, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		outcome.Err = err.Error()
+		outcome.Status = "ERROR"
+		return outcome
+	}
+	cfg, err := config.Load(home)
+	if err != nil {
+		outcome.Err = "加载配置失败: " + err.Error()
+		outcome.Status = "ERROR"
+		return outcome
+	}
+	budget := c.BudgetUSD
+	if budget <= 0 {
+		budget = 2
+	}
+	cfg.Repos = map[string]config.RepoConfig{
+		"bench/" + c.ID: {
+			LocalPath:         repoDir,
+			DefaultBranch:     "main",
+			Remote:            "origin",
+			VerifyCommands:    orderedVerify(c.Verify),
+			VerifyConfigFiles: c.VerifyConfigFiles,
+			BudgetUSD:         budget,
+		},
+	}
+	cfg.Delivery.Enabled = false
+	cfg.Review.Enabled = opts.Model != nil || opts.Reviewer != nil
+	cfg.Triage.UseModel = opts.Model != nil
+	cfg.Planning.Mode = "auto"
+
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		outcome.Err = "打开数据库失败: " + err.Error()
+		outcome.Status = "ERROR"
+		return outcome
+	}
+	defer st.Close()
+
+	task, err := st.CreateTask(store.NewTask{
+		Repo: "bench/" + c.ID, Requirement: c.Requirement, BudgetUSD: budget,
+	})
+	if err != nil {
+		outcome.Err = "创建任务失败: " + err.Error()
+		outcome.Status = "ERROR"
+		return outcome
+	}
+
+	be, err := opts.BackendFor(c)
+	if err != nil {
+		outcome.Err = "构造后端失败: " + err.Error()
+		outcome.Status = "ERROR"
+		return outcome
+	}
+	orchOpts := []orchestrator.Option{}
+	if opts.Model != nil {
+		orchOpts = append(orchOpts, orchestrator.WithModel(
+			opts.Model.Client, opts.Model.Model, opts.Model.MaxTokens, opts.Model.Pricing))
+	}
+	if opts.Reviewer != nil {
+		orchOpts = append(orchOpts, orchestrator.WithReviewer(opts.Reviewer))
+	}
+	orch := orchestrator.New(st, cfg, be, orchOpts...)
+
+	result, runErr := orch.RunTask(task.ID)
+	outcome.DurationS = time.Since(started).Seconds()
+	if runErr != nil {
+		outcome.Err = runErr.Error()
+	}
+	outcome.Status = string(result.Status)
+	if outcome.Status == "" {
+		outcome.Status = "ERROR"
+	}
+	outcome.Level = result.Level
+	outcome.SpentUSD = result.SpentUSD
+	outcome.FixAttempts = result.FixAttempts
+	outcome.ReviewAttempts = result.ReviewAttempts
+	outcome.CIAttempts = result.CIAttempts
+	outcome.LevelMatched = c.ExpectLevel == "" || strings.EqualFold(result.Level, c.ExpectLevel)
+	outcome.Passed = result.Status == state.Done && runErr == nil && outcome.LevelMatched
+
+	if events, err := st.ListEvents(task.ID); err == nil {
+		outcome.Degradations = len(report.Degradations(events))
+	}
+	return outcome
+}
+
+func summarize(outcomes []Outcome) Summary {
+	var s Summary
+	s.Total = len(outcomes)
+	if len(outcomes) == 0 {
+		return s
+	}
+	var fixRounds int
+	for _, o := range outcomes {
+		if o.Passed {
+			s.Passed++
+		}
+		if o.Status == string(state.NeedsHuman) || o.Status == "ERROR" {
+			s.HumanRate++
+		}
+		s.TotalCostUSD += o.SpentUSD
+		fixRounds += o.FixAttempts
+	}
+	s.SuccessRate = float64(s.Passed) / float64(s.Total)
+	s.HumanRate = s.HumanRate / float64(s.Total)
+	s.MeanCostUSD = s.TotalCostUSD / float64(s.Total)
+	s.MeanFixRounds = float64(fixRounds) / float64(s.Total)
+	return s
+}
+
+// orderedVerify 保留 YAML 声明顺序。映射在解析后是无序的，因此这里按名称排序，
+// 保证同一清单每次执行顺序一致（验证顺序影响首次失败的定位）。
+func orderedVerify(m map[string]string) config.VerifyCommands {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make(config.VerifyCommands, 0, len(names))
+	for _, name := range names {
+		out = append(out, config.VerifyCommand{Name: name, Command: m[name]})
+	}
+	return out
+}
+
+func copyFixture(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s 不是目录", src)
+	}
+	return filepath.WalkDir(src, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0o755)
+		}
+		// fixture 里即使误带了 .git 也不复制：每次都要从干净历史重建。
+		if entry.IsDir() && entry.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		target := filepath.Join(dst, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
+}
+
+func initRepo(dir string) error {
+	if _, err := workspace.Git(dir, "init", "-b", "main"); err != nil {
+		return err
+	}
+	if _, err := workspace.Git(dir, "add", "-A"); err != nil {
+		return err
+	}
+	_, err := workspace.Git(dir, "-c", "user.name=bench", "-c", "user.email=bench@localhost",
+		"commit", "-m", "bench fixture baseline")
+	return err
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}

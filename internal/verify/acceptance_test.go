@@ -17,6 +17,39 @@ func newVerifier(t *testing.T) (Verifier, string) {
 	return Verifier{Timeout: 30 * time.Second, ArtifactsDir: filepath.Join(dir, "art")}, dir
 }
 
+// 选择器匹配不到测试时必须标记为“不可执行”，而不是普通失败或假通过。
+// `go test -run 不存在的测试` 退出码为 0，若只看退出码会得到假通过。
+func TestRunAllMarksSelectorMatchingNoTestsAsInvalid(t *testing.T) {
+	v, dir := newVerifier(t)
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module fixture\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "x_test.go"),
+		[]byte("package fixture\n\nimport \"testing\"\n\nfunc TestOK(t *testing.T) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commands := config.VerifyCommands{{Name: "test", Command: "go test ./..."}}
+	acceptance := []planning.Acceptance{{
+		ID: "ac1", Description: "指定测试通过",
+		Check: planning.Check{Type: planning.CheckTest, Name: "test", Selector: "-run NoSuchTest"},
+	}}
+
+	rep, err := v.RunAll(dir, commands, acceptance, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Passed {
+		t.Fatalf("匹配不到测试的检查不能算通过: %+v", rep)
+	}
+	invalid := rep.InvalidAcceptance()
+	if len(invalid) != 1 || invalid[0].ID != "ac1" {
+		t.Fatalf("应标记为不可执行的验收标准: %+v", rep.Acceptance)
+	}
+	if !strings.Contains(invalid[0].Evidence, "未匹配到任何测试") {
+		t.Errorf("证据应说明原因: %s", invalid[0].Evidence)
+	}
+}
+
 func TestRunAllReusesMatchingCommandResult(t *testing.T) {
 	v, dir := newVerifier(t)
 	commands := config.VerifyCommands{{Name: "base", Command: "echo base"}}

@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"agentdev/internal/backend"
+	"agentdev/internal/bench"
 	"agentdev/internal/config"
 	"agentdev/internal/cost"
 	"agentdev/internal/llm"
@@ -65,7 +66,8 @@ func NewRoot() *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&opts.home, "home", "", "数据目录，默认读取 AGENTDEV_HOME 或 ~/.agentdev")
 
-	root.AddCommand(versionCmd(), configCmd(opts), doctorCmd(opts), taskCmd(opts), runCmd(opts), costCmd(opts))
+	root.AddCommand(versionCmd(), configCmd(opts), doctorCmd(opts), taskCmd(opts), runCmd(opts),
+		costCmd(opts), benchCmd(opts))
 	return root
 }
 
@@ -1124,6 +1126,117 @@ func reportResult(out io.Writer, cfg *config.App, result store.Task) (error, boo
 		return &ExitErr{Code: ExitError}, true
 	}
 	return nil, false
+}
+
+// benchCmd 运行可复现的基准集，输出成功率、成本与修复轮数。
+func benchCmd(opts *options) *cobra.Command {
+	var (
+		manifestPath string
+		backendName  string
+		scriptPath   string
+		only         string
+		workDir      string
+		keep         bool
+		asJSON       bool
+		minRate      float64
+	)
+	cmd := &cobra.Command{
+		Use:   "bench",
+		Short: "运行基准集并测量成功率与成本",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfig(opts)
+			if err != nil {
+				return err
+			}
+			manifest, err := bench.Load(manifestPath)
+			if err != nil {
+				return fail(ExitUsage, "%v", err)
+			}
+			if only != "" {
+				wanted := map[string]bool{}
+				for _, id := range strings.Split(only, ",") {
+					wanted[strings.TrimSpace(id)] = true
+				}
+				var filtered []bench.Case
+				for _, c := range manifest.Cases {
+					if wanted[c.ID] {
+						filtered = append(filtered, c)
+					}
+				}
+				if len(filtered) == 0 {
+					return fail(ExitUsage, "--only 没有匹配任何用例")
+				}
+				manifest.Cases = filtered
+			}
+
+			benchOpts := bench.Options{
+				WorkDir: workDir,
+				Keep:    keep,
+				Log:     cmd.OutOrStdout(),
+				BackendFor: func(bench.Case) (backend.ExecutionBackend, error) {
+					return makeBackend(cfg, backendName, scriptPath)
+				},
+			}
+			if backendName != "fake" {
+				key := os.Getenv(cfg.Models.APIKeyEnv)
+				if key == "" {
+					return fail(ExitUsage, "未设置环境变量 %s（见 models.yaml 的 api_key_env）", cfg.Models.APIKeyEnv)
+				}
+				benchOpts.Model = &bench.ModelConfig{
+					Client:    llm.NewClient(cfg.Models.BaseURL, key),
+					Model:     cfg.Models.Model,
+					MaxTokens: cfg.Models.MaxTokens,
+					Pricing:   pricingTable(cfg),
+				}
+			}
+
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			summary, outcomes, err := bench.RunManifest(ctx, filepath.Dir(manifestPath), manifest, benchOpts)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if asJSON {
+				encoder := json.NewEncoder(out)
+				encoder.SetIndent("", "  ")
+				return encoder.Encode(map[string]any{"summary": summary, "outcomes": outcomes})
+			}
+			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "用例\t结果\t级别\t花费\t修复\t审查\tCI\t降级")
+			for _, o := range outcomes {
+				mark := "FAIL"
+				if o.Passed {
+					mark = "PASS"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t$%.4f\t%d\t%d\t%d\t%d\n",
+					o.ID, mark, orDash(o.Level), o.SpentUSD,
+					o.FixAttempts, o.ReviewAttempts, o.CIAttempts, o.Degradations)
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "\n成功率 %d/%d = %.0f%%   人工介入 %.0f%%   平均修复 %.2f 轮   平均花费 $%.4f   总花费 $%.4f\n",
+				summary.Passed, summary.Total, summary.SuccessRate*100, summary.HumanRate*100,
+				summary.MeanFixRounds, summary.MeanCostUSD, summary.TotalCostUSD)
+			if minRate > 0 && summary.SuccessRate < minRate {
+				return fail(ExitError, "成功率 %.0f%% 低于门槛 %.0f%%", summary.SuccessRate*100, minRate*100)
+			}
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&manifestPath, "manifest", filepath.Join("bench", "tasks.yaml"), "基准清单路径")
+	f.StringVar(&backendName, "backend", "anthropic", "anthropic / fake")
+	f.StringVar(&scriptPath, "script", "", "fake 后端的脚本 JSON（每个用例重新读取）")
+	f.StringVar(&only, "only", "", "只运行指定用例，逗号分隔")
+	f.StringVar(&workDir, "workdir", "", "临时工作目录（默认系统临时目录）")
+	f.BoolVar(&keep, "keep", false, "保留临时目录以便排查")
+	f.BoolVar(&asJSON, "json", false, "以 JSON 输出")
+	f.Float64Var(&minRate, "min-rate", 0, "成功率低于该值（0-1）时以退出码 1 结束")
+	return cmd
 }
 
 func buildOrchestrator(cfg *config.App, st store.Repository, backendName, scriptPath string, push bool) (*orchestrator.Orchestrator, error) {

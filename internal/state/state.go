@@ -53,16 +53,18 @@ var base = map[Status]map[Status]bool{
 	NeedsInfo:        set(Planning),
 	AwaitingApproval: set(Coding),
 	Coding:           set(Verifying, NeedsInfo),
-	Verifying:        set(Coding, Reviewing, Committing),
-	Reviewing:        set(Coding, Committing),
-	Committing:       set(Pushed, Done),
-	Pushed:           set(PROpened),
-	PROpened:         set(Done, CIWatching),
-	CIWatching:       set(Coding, Done),
-	Done:             set(),
-	NeedsHuman:       resumable(),
-	Failed:           set(),
-	Cancelled:        set(),
+	// Verifying → Planning 用于“验收标准本身不可执行”（例如选择器匹配不到测试）：
+	// 这类失败改代码无法解决，必须重新规划而不是空耗修复轮次。
+	Verifying:  set(Coding, Planning, Reviewing, Committing),
+	Reviewing:  set(Coding, Committing),
+	Committing: set(Pushed, Done),
+	Pushed:     set(PROpened),
+	PROpened:   set(Done, CIWatching),
+	CIWatching: set(Coding, Done),
+	Done:       set(),
+	NeedsHuman: resumable(),
+	Failed:     set(),
+	Cancelled:  set(),
 }
 
 var transitions = build()

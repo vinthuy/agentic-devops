@@ -12,6 +12,7 @@ func TestAllowedTransitions(t *testing.T) {
 		{Coding, Verifying},
 		{Coding, NeedsInfo},
 		{Verifying, Coding},
+		{Verifying, Planning},
 		{Verifying, Reviewing},
 		{Reviewing, Coding},
 		{Reviewing, Committing},
