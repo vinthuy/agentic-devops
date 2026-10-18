@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"agentdev/internal/config"
 )
@@ -61,8 +62,21 @@ func repoDirName(repo string) string {
 	return strings.ReplaceAll(repo, "/", "__")
 }
 
+// gitWorktreeMu 串行化 worktree 的创建与删除。
+//
+// `git worktree add/remove` 会写共享仓库的 .git/worktrees 与 config，并发调用
+// 同一仓库时会互相踩踏（git 用文件锁，失败表现为 “could not lock config file”）。
+// 这些操作很快，进程级串行化比按仓库维护锁表更简单可靠。
+var gitWorktreeMu sync.Mutex
+
 // Create 基于默认分支创建 worktree 与新分支 <prefix><taskID>-<slug>。
 func (m *Manager) Create(repoName string, repo config.RepoConfig, taskID, slugSource string) (Info, error) {
+	gitWorktreeMu.Lock()
+	defer gitWorktreeMu.Unlock()
+	return m.create(repoName, repo, taskID, slugSource)
+}
+
+func (m *Manager) create(repoName string, repo config.RepoConfig, taskID, slugSource string) (Info, error) {
 	base, err := Git(repo.LocalPath, "rev-parse", repo.DefaultBranch)
 	if err != nil {
 		return Info{}, err
@@ -186,6 +200,8 @@ func (m *Manager) HeadCommitFor(info Info, taskID string) (string, bool, error) 
 
 // Remove 删除 worktree；keepBranch 为 false 时同时删除分支。
 func (m *Manager) Remove(repo config.RepoConfig, info Info, keepBranch bool) error {
+	gitWorktreeMu.Lock()
+	defer gitWorktreeMu.Unlock()
 	_, _ = Git(repo.LocalPath, "worktree", "remove", "--force", info.Path)
 	if !keepBranch {
 		_, _ = Git(repo.LocalPath, "branch", "-D", info.Branch)

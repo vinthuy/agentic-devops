@@ -889,6 +889,7 @@ agentic-devops/
 | ADR-23 | 验收标准不可执行时回到规划（自动一次），而非消耗代码修复轮次 | 当成普通验证失败反复改代码；直接悄悄跳过该标准 | 基准集首次运行中，模型凭空编造了不存在的测试选择器（`python -m unittest` 也不支持 pytest 的 `::` 语法），代码明明是正确修复，却烧完 3 次预算报“修复次数已达上限”。不可执行的检查改代码永远满足不了，必须区分“计划缺陷”与“代码缺陷”。自动重规划有界（一次），之后转人工。识别范围包括“未选中任何测试”和各运行器的拒绝签名（unittest 加载失败、Go 文件名与包模式混用、Node 找不到测试文件等）——只看退出码不够，某些运行器对空选择器返回 0 |
 | ADR-24 | 修复上限耗尽时区分主验证与附加断言：`command`/`test` 通过、仅 `grep`/`file_exists` 失败时，归因为“验收标准可能写错” | 统一报“修复次数已达上限” | 基准集中出现 grep 正则写错一个引号、永远无法匹配，但单元测试全部通过的情况。误导性归因会让人以为是代码质量问题。注意：附加断言仍然阻塞交付，只是失败原因如实说明，不降低验证门槛 |
 | ADR-25 | 审批允许替换计划，但写入范围只能收紧 | 允许审批时任意改计划；或完全不允许修改 | 人工修正验收标准是必要的（模型会写出不可执行的检查），但审批也是权限提升的入口——如果允许扩大 `allowed_paths`，审批就变成了绕过策略的通道。因此 `approve --plan` 必须重新通过 `Validate`，且每个新范围都要被原范围覆盖 |
+| ADR-26 | 并发执行采用「一次批量领取 + worker 分发」，worktree 操作进程内串行化 | 每个 worker 循环调用 `NextRunnable`；或引入外部队列/多进程 | SQLite 没有 `SELECT ... FOR UPDATE`，边跑边领取会让两个 worker 拿到同一任务；批量领取后分发可以保证归属唯一。`git worktree add/remove` 会写共享仓库的管理文件，并发调用会踩踏，串行化这几毫秒操作比按仓库维护锁表更简单可靠。退出码按「需要人工 > 一般错误」聚合 |
 
 ---
 
@@ -1059,7 +1060,7 @@ stateDiagram-v2
 | AC-35 | FR-061 | 状态转换与关键事件入库，非法转换不改变状态 | `TestCreateTaskWritesQueuedAndEvent`、`TestTransitionUpdatesStatusVersionAndFields`、`TestInvalidTransitionRejectedAndStateUnchanged` | 已覆盖 |
 | AC-36 | FR-062 | 运行报告包含时间线、成本、降级、审查、CI 与提交审计 | `TestReportIncludesCostAndPR`、`TestReportRendersSourceAndDegradationProminently`、`TestReportShowsArtifactAuditAndReviewerDecision` | 已覆盖 |
 | AC-37 | FR-063 | 中断后可 resume；恢复时重置修复、审查、CI 计数；进程被杀后不重复提交 | `TestResumeAfterNeedsHuman`、`TestResumeResetsAllM2AttemptCounters`、`TestCrashDuringCodingThenResumeCompletes`、`TestCommitStepRecoversCommitFromCrashedRun` | 已覆盖（含真实子进程 kill 后 resume） |
-| AC-38 | FR-064 | 同时运行的任务数有上限 | — | **未实现**（P1；当前按 `run --max` 顺序执行） |
+| AC-38 | FR-064 | 支持同时运行多个任务，且同一任务不会被重复领取；并发数为 1 时保持串行 | `TestRunParallelProcessesMultipleTasks`、`TestListRunnableReturnsDistinctBatch`、`TestPickRunExitPrefersHuman` | 已覆盖（`run --max N --parallel M`） |
 | AC-39 | FR-070 | `repos.yaml` 字段、默认值与校验；验证命令顺序保留 | `TestLoadRepoPreservesVerifyOrderAndDefaultsBranch`、`TestValidateRejectsEmptyVerifyAndBadBudget` | 已覆盖 |
 | AC-40 | FR-071 | `policy.yaml` 缺省使用内置默认；语法错误明确报告 | `TestLoadDefaultsWhenFilesMissing`、`TestInvalidYAMLReported` | 已覆盖 |
 | AC-41 | FR-072 | 单价按模型配置；未知模型显式报告，不当作免费 | `TestTableUnknownModelReturnsNotOK`、`TestUnknownPricingIsReportedNotSilentlyFree` | 已覆盖 |
@@ -1120,7 +1121,7 @@ stateDiagram-v2
 | ~~G-04~~ | ~~worktree 基线未直接断言为默认分支 HEAD~~ | AC-10 | **已关闭**：`TestCreateWorktreeFromDefaultBranchHead` 断言基线 SHA、分支前缀且不含其他分支内容 | 已关闭 |
 | ~~G-05~~ | ~~`task logs` 命令未实现~~ | AC-34 | **已关闭**：`task logs <id> [--limit N] [--json]`，复用 `report.EventDetail`；`TestTaskLogsShowsTimelineAndJSON` | 已关闭 |
 | ~~G-06~~ | ~~审批时不能修改计划~~ | AC-09 | **已关闭**：`task approve --plan <file>`；计划须通过 `planning.Validate`，且 `allowed_paths` 只能收紧（`vettedPlanFile`/`scopeCovered`）；`TestApproveWithEditedPlan`、`TestVettedPlanFileScopeRules` | 已关闭 |
-| G-07 | 没有并发任务上限 | AC-38 | 按 FR-064（P1）增加调度器并发控制 | 低（P1） |
+| ~~G-07~~ | ~~没有并发任务上限~~ | AC-38 | **已关闭**：`run --parallel M`（上限受 `--max` 约束）；先批量领取任务再分发，`git worktree add/remove` 进程内串行化；每个任务独立后端与输出缓冲；退出码「需要人工」优先 | 已关闭 |
 | G-08 | 真实 CI 首次通过率仍未测量 | 21.6 | **大部分关闭**：20 个 S 级用例、3 个技术栈已建立并可复现运行；支持 `--repeat` 重复采样（见 §22）。剩余：接入真实仓库 CI 才能测 PRD 的 CI 首次通过率 | 高（产品验证） |
 | G-09 | 线上 Draft PR 与 CI 闭环未在真实远端验证（本次仅完成推送与建仓） | AC-02、AC-23、AC-28、REL-09 | 剧本与沙箱模板已就绪（§23、`bench/sandbox/`），在授权测试仓库上执行并记录 E2E-1 至 E2E-6 的结果 | 高（产品验证） |
 | ~~G-10~~ | ~~进程崩溃恢复只有计数与状态测试，没有故障注入~~ | AC-37、REL 系列 | **已关闭**：`TestCrashDuringCodingThenResumeCompletes` 真正启动 CLI 子进程，在第 4 次模型调用处阻塞并 kill，再用新进程 resume；断言崩溃后状态仍为 CODING、已写入文件保留、恢复后 DONE 且任务提交恰好 1 个。另有两个状态边界测试覆盖 commit 后崩溃与“无改动仍挂起” | 已关闭 |

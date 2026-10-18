@@ -45,6 +45,7 @@ agentdev config validate
 agentdev task create --repo acme/web-app --text "修复登录页邮箱含 + 号时校验失败"
 agentdev task create --repo acme/web-app --issue 123  # 需 gh 登录；从 GitHub 导入 Issue 正文
 agentdev run                                  # 默认 --backend anthropic（协议），指向 DeepSeek
+agentdev run --max 5 --parallel 2             # 批量推进，最多 2 个任务并发
 agentdev task status <task-id>
 agentdev task logs <task-id> [--limit N] [--json]   # 完整审计时间线
 agentdev cost <task-id>                       # 花费明细

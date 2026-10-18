@@ -62,6 +62,31 @@ func TestOpenMigratesReviewAttemptsColumn(t *testing.T) {
 	_ = s2.Close()
 }
 
+// 并发执行前一次性取定任务批次，避免两个 worker 领到同一个任务。
+func TestListRunnableReturnsDistinctBatch(t *testing.T) {
+	s := openTemp(t)
+	first := create(t, s, "acme/a")
+	create(t, s, "acme/a")
+	create(t, s, "acme/a")
+
+	batch, err := s.ListRunnable(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch) != 2 {
+		t.Fatalf("应返回 2 个任务，实际 %d", len(batch))
+	}
+	if batch[0].ID != first.ID {
+		t.Errorf("应按插入顺序返回，首个应为 %s，实际 %s", first.ID, batch[0].ID)
+	}
+	if batch[0].ID == batch[1].ID {
+		t.Error("批次内不应出现重复任务")
+	}
+	if one, err := s.ListRunnable(0); err != nil || len(one) != 1 {
+		t.Errorf("limit<=0 应按 1 处理: %v %d", err, len(one))
+	}
+}
+
 func TestListAllCostsIncludesTaskIDs(t *testing.T) {
 	s := openTemp(t)
 	a := create(t, s, "acme/a")

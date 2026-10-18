@@ -26,6 +26,63 @@ func (s *stubIssueReader) Read(_ context.Context, repo string, number int64) (gi
 	return s.issue, nil
 }
 
+// G-07：多个任务可以并发推进，每个任务使用独立 worktree。
+func TestRunParallelProcessesMultipleTasks(t *testing.T) {
+	home := writeHome(t, testutil.NewRepo(t))
+	var ids []string
+	for i := 0; i < 3; i++ {
+		ids = append(ids, createTask(t, home))
+	}
+	script := writeScript(t, home, "good.json", goodStep())
+
+	code, out, errOut := invoke(t, "run", "--backend", "fake", "--script", script,
+		"--max", "3", "--parallel", "2", "--home", home)
+	if code != ExitOK {
+		t.Fatalf("并发执行失败 (%d): %s %s", code, out, errOut)
+	}
+	if got := strings.Count(out, "最终状态: DONE"); got != 3 {
+		t.Fatalf("应有 3 个任务完成，实际 %d:\n%s", got, out)
+	}
+	for _, id := range ids {
+		if !strings.Contains(out, id) {
+			t.Errorf("输出中缺少任务 %s", id)
+		}
+	}
+
+	s, err := store.Open(filepath.Join(home, "agentdev.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, id := range ids {
+		task, err := s.GetTask(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.Status != state.Done {
+			t.Errorf("任务 %s 状态应为 DONE，实际 %s", id, task.Status)
+		}
+		if task.WorktreePath == "" {
+			t.Errorf("任务 %s 缺少 worktree", id)
+		}
+	}
+}
+
+// 「需要人工」的退出码优先于一般错误：它要求人做决定。
+func TestPickRunExitPrefersHuman(t *testing.T) {
+	if got := pickRunExit(nil); got != nil {
+		t.Errorf("无结果时应返回 nil，实际 %v", got)
+	}
+	human := &ExitErr{Code: ExitHuman}
+	failure := &ExitErr{Code: ExitError}
+	if got := pickRunExit([]error{failure, human}); got != human {
+		t.Errorf("应优先返回需要人工的退出码，实际 %v", got)
+	}
+	if got := pickRunExit([]error{failure}); got != failure {
+		t.Errorf("只有错误时应返回该错误，实际 %v", got)
+	}
+}
+
 // G-06：审批时可替换计划，但只能收紧写入范围，不能扩大。
 func TestApproveWithEditedPlan(t *testing.T) {
 	home := writeHome(t, testutil.NewRepo(t))

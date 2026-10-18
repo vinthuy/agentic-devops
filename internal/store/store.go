@@ -429,6 +429,38 @@ func (s *SQLiteStore) NextRunnable() (Task, bool, error) {
 	return s.nextByStatus(RunnableStatuses)
 }
 
+// ListRunnable 一次取出最多 limit 个可推进任务。
+//
+// 并发执行时先一次性取定任务列表，再分发给 worker：这样同一个任务不会被
+// 两个 worker 同时领走（SQLite 没有 SELECT ... FOR UPDATE，逐条领取会重复）。
+func (s *SQLiteStore) ListRunnable(limit int) ([]Task, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	placeholders := make([]string, 0, len(RunnableStatuses))
+	args := make([]any, 0, len(RunnableStatuses)+1)
+	for _, st := range RunnableStatuses {
+		placeholders = append(placeholders, "?")
+		args = append(args, string(st))
+	}
+	args = append(args, limit)
+	rows, err := s.db.Query("SELECT "+taskColumns+" FROM tasks WHERE status IN ("+
+		strings.Join(placeholders, ",")+") ORDER BY rowid LIMIT ?", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLiteStore) nextByStatus(statuses []state.Status) (Task, bool, error) {
 	placeholders := make([]string, 0, len(statuses))
 	args := make([]any, 0, len(statuses))

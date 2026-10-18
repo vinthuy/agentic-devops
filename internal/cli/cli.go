@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -1060,7 +1062,7 @@ func printCostAggregate(out io.Writer, title string, groups map[string]*costAggr
 
 func runCmd(opts *options) *cobra.Command {
 	var backendName, scriptPath, taskID string
-	var maxTasks int
+	var maxTasks, parallel int
 	var push bool
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -1092,45 +1094,76 @@ func runCmd(opts *options) *cobra.Command {
 				}
 				return runOne(cmd, cfg, st, orch, taskID)
 			}
-			if _, ok, err := st.NextRunnable(); err != nil {
-				return err
-			} else if !ok {
-				fmt.Fprintln(out, "没有可推进的任务")
-				return nil
-			}
 			if maxTasks <= 0 {
 				maxTasks = 1
 			}
-			for i := 0; i < maxTasks; i++ {
-				next, ok, err := st.NextRunnable()
-				if err != nil {
-					return err
-				}
-				if !ok {
-					if i == 0 {
-						fmt.Fprintln(out, "没有可推进的任务")
-					}
-					return nil
-				}
-				// 每个任务使用独立的后端实例：脚本/状态不应跨任务泄漏。
-				orch, err := buildOrchestrator(cfg, st, backendName, scriptPath, push)
-				if err != nil {
-					return err
-				}
-				fmt.Fprintf(out, "开始执行 %s（%s，%s）\n", next.ID, next.Repo, levelLabel(next.Level))
-				result, err := orch.RunTask(next.ID)
-				if err != nil {
-					return err
-				}
-				code, stopped := reportResult(out, cfg, result)
-				if err := printDegradations(out, st, result.ID); err != nil {
-					return err
-				}
-				if stopped {
-					return code
-				}
+			if parallel < 1 {
+				parallel = 1
 			}
-			return nil
+			if parallel > maxTasks {
+				parallel = maxTasks
+			}
+
+			// 先一次性取定任务列表：SQLite 没有 SELECT ... FOR UPDATE，
+			// 边跑边领取会让两个 worker 领到同一个任务。
+			pending, err := st.ListRunnable(maxTasks)
+			if err != nil {
+				return err
+			}
+			if len(pending) == 0 {
+				fmt.Fprintln(out, "没有可推进的任务")
+				return nil
+			}
+
+			// 串行时保持原有顺序语义；并发时每个任务独立后端与输出缓冲，
+			// 输出在任务结束时整体写出，避免多任务日志互相穿插。
+			var (
+				mu      sync.Mutex
+				results []error
+				wg      sync.WaitGroup
+			)
+			sem := make(chan struct{}, parallel)
+			for _, next := range pending {
+				wg.Add(1)
+				go func(next store.Task) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+
+					var buf bytes.Buffer
+					fmt.Fprintf(&buf, "开始执行 %s（%s，%s）\n", next.ID, next.Repo, levelLabel(next.Level))
+
+					orch, err := buildOrchestrator(cfg, st, backendName, scriptPath, push)
+					if err != nil {
+						fmt.Fprintf(&buf, "[FAIL] 任务 %s 启动失败: %v\n", next.ID, err)
+						mu.Lock()
+						_, _ = out.Write(buf.Bytes())
+						results = append(results, err)
+						mu.Unlock()
+						return
+					}
+					result, runErr := orch.RunTask(next.ID)
+					if runErr != nil {
+						fmt.Fprintf(&buf, "[FAIL] 任务 %s 执行失败: %v\n", next.ID, runErr)
+						mu.Lock()
+						_, _ = out.Write(buf.Bytes())
+						results = append(results, runErr)
+						mu.Unlock()
+						return
+					}
+					code, stopped := reportResult(&buf, cfg, result)
+					_ = printDegradations(&buf, st, result.ID)
+
+					mu.Lock()
+					_, _ = out.Write(buf.Bytes())
+					if stopped {
+						results = append(results, code)
+					}
+					mu.Unlock()
+				}(next)
+			}
+			wg.Wait()
+			return pickRunExit(results)
 		},
 	}
 	f := cmd.Flags()
@@ -1138,8 +1171,34 @@ func runCmd(opts *options) *cobra.Command {
 	f.StringVar(&scriptPath, "script", "", "fake 后端的脚本 JSON 文件")
 	f.StringVar(&taskID, "task", "", "只推进指定的任务（可为挂起后已恢复的任务）")
 	f.IntVar(&maxTasks, "max", 1, "最多连续推进几个任务")
+	f.IntVar(&parallel, "parallel", 1, "同时执行的任务数（上限受 --max 约束）")
 	f.BoolVar(&push, "push", false, "本次强制开启推送与创建草稿 PR（覆盖 delivery.enabled）")
 	return cmd
+}
+
+// pickRunExit 汇总多个任务的退出码。
+// 「需要人工」优先于「一般错误」：它要求人做决定，信息量更大。
+func pickRunExit(results []error) error {
+	var fallback error
+	for _, err := range results {
+		if err == nil {
+			continue
+		}
+		var exitErr *ExitErr
+		if errors.As(err, &exitErr) {
+			if exitErr.Code == ExitHuman {
+				return exitErr
+			}
+			if fallback == nil {
+				fallback = exitErr
+			}
+			continue
+		}
+		if fallback == nil {
+			fallback = err
+		}
+	}
+	return fallback
 }
 
 func runOne(cmd *cobra.Command, cfg *config.App, st store.Repository, orch *orchestrator.Orchestrator, taskID string) error {
