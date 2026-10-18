@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"agentdev/internal/config"
@@ -138,6 +139,17 @@ func TestForbiddenCommands(t *testing.T) {
 		if err := e.CheckCommand(cmd); err == nil {
 			t.Errorf("%q 应当被拒绝", cmd)
 		}
+	}
+}
+
+func TestDeniedCommandExplainsAllowedCommands(t *testing.T) {
+	e := newEngine(t, nil)
+	err := e.CheckCommand("pytest")
+	if err == nil {
+		t.Fatal("pytest should be rejected")
+	}
+	if !strings.Contains(err.Error(), "go test ./...") || !strings.Contains(err.Error(), "npm run") {
+		t.Errorf("拒绝信息应列出允许命令，实际: %v", err)
 	}
 }
 

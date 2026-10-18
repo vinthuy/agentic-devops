@@ -79,6 +79,8 @@ func render(
 	line("- 生成时间: %s", generatedAt)
 	line("- 仓库: %s", task.Repo)
 	line("- 分级: %s", orDash(task.Level))
+	line("- 分级来源: %s", triageSource(events, costs))
+	line("- 计划来源: %s", planSource(events, costs))
 	line("- 最终状态: **%s**", task.Status)
 	line("- 分支: %s", orDash(task.Branch))
 	line("- 基线提交: %s", orDash(task.BaseSHA))
@@ -89,6 +91,23 @@ func render(
 	line("- 修复次数: %d", task.FixAttempts)
 	line("- 预算: $%.2f，已用: $%.4f", task.BudgetUSD, task.SpentUSD)
 	line("")
+
+	// 降级必须显眼：否则一份降级跑出来的报告会和完全跑通的报告无法区分。
+	if degs := Degradations(events); len(degs) > 0 {
+		line("## 降级与异常")
+		line("")
+		line("本次运行有 %d 处偏离设计承诺，结论需人工确认：", len(degs))
+		line("")
+		for _, d := range degs {
+			if d.Detail == "" {
+				line("- `%s` %s：%s", d.TS, d.Type, d.Label)
+				continue
+			}
+			line("- `%s` %s：%s —— %s", d.TS, d.Type, d.Label, d.Detail)
+		}
+		line("")
+	}
+
 	line("## 需求")
 	line("")
 	line("> %s", strings.ReplaceAll(task.Requirement, "\n", "\n> "))

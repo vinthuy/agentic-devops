@@ -18,6 +18,7 @@ import (
 	"agentdev/internal/cost"
 	"agentdev/internal/llm"
 	"agentdev/internal/orchestrator"
+	"agentdev/internal/report"
 	"agentdev/internal/state"
 	"agentdev/internal/store"
 	"agentdev/internal/triage"
@@ -713,6 +714,9 @@ func runCmd(opts *options) *cobra.Command {
 					return err
 				}
 				code, stopped := reportResult(out, cfg, result)
+				if err := printDegradations(out, st, result.ID); err != nil {
+					return err
+				}
 				if stopped {
 					return code
 				}
@@ -744,9 +748,29 @@ func runOne(cmd *cobra.Command, cfg *config.App, st store.Repository, orch *orch
 		return err
 	}
 	code, stopped := reportResult(out, cfg, result)
+	if err := printDegradations(out, st, result.ID); err != nil {
+		return err
+	}
 	if stopped {
 		return code
 	}
+	return nil
+}
+
+func printDegradations(out io.Writer, st store.Repository, taskID string) error {
+	events, err := st.ListEvents(taskID)
+	if err != nil {
+		return err
+	}
+	degradations := report.Degradations(events)
+	if len(degradations) == 0 {
+		return nil
+	}
+	fmt.Fprintf(out, "[WARN] 本次运行有 %d 处降级或异常：\n", len(degradations))
+	for _, d := range degradations {
+		fmt.Fprintf(out, "[WARN] - %s\n", d.SummaryLine())
+	}
+	fmt.Fprintln(out, "[WARN] 请查看运行报告中的“降级与异常”部分后再审阅结果。")
 	return nil
 }
 

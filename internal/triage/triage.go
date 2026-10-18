@@ -140,48 +140,37 @@ func (m *ModelEstimator) Estimate(ctx context.Context, requirement string, repo 
 	fmt.Fprintf(&b, "验证命令: %s\n", strings.Join(names, ", "))
 	b.WriteString("</repo_context>")
 
-	resp, err := m.Client.Messages(ctx, llm.Request{
-		Model:      m.Model,
-		MaxTokens:  m.MaxTokens,
-		System:     triagePrompt,
-		Messages:   []any{map[string]any{"role": "user", "content": b.String()}},
-		Tools:      []map[string]any{submitEstimateTool()},
-		ToolChoice: map[string]any{"type": "tool", "name": "submit_estimate"},
-	})
+	resp, input, err := m.Client.CallTool(ctx, llm.Request{
+		Model:     m.Model,
+		MaxTokens: m.MaxTokens,
+		System:    triagePrompt,
+		Messages:  []any{map[string]any{"role": "user", "content": b.String()}},
+		Tools:     []map[string]any{submitEstimateTool()},
+	}, "submit_estimate")
 	if err != nil {
 		return Result{}, err
 	}
 
-	for _, raw := range resp.Content {
-		block, err := llm.ParseBlock(raw)
-		if err != nil {
-			continue
-		}
-		if block.Type != "tool_use" || block.Name != "submit_estimate" {
-			continue
-		}
-		data, err := json.Marshal(block.Input)
-		if err != nil {
-			return Result{}, err
-		}
-		var est estimate
-		if err := json.Unmarshal(data, &est); err != nil {
-			return Result{}, fmt.Errorf("分级结果无法解析: %w", err)
-		}
-		lvl := S
-		switch strings.ToUpper(est.Level) {
-		case "L":
-			lvl = L
-		case "M":
-			lvl = M
-		}
-		reasons := append([]string(nil), est.Reasons...)
-		if est.Files > 0 {
-			reasons = append(reasons, fmt.Sprintf("预估改动 %d 个文件 / %d 行", est.Files, est.Lines))
-		}
-		return Result{Level: lvl, Reasons: reasons, ModelUsed: true, Usage: resp.Usage}, nil
+	data, err := json.Marshal(input)
+	if err != nil {
+		return Result{}, err
 	}
-	return Result{}, fmt.Errorf("模型未调用 submit_estimate 返回分级")
+	var est estimate
+	if err := json.Unmarshal(data, &est); err != nil {
+		return Result{}, fmt.Errorf("分级结果无法解析: %w", err)
+	}
+	lvl := S
+	switch strings.ToUpper(est.Level) {
+	case "L":
+		lvl = L
+	case "M":
+		lvl = M
+	}
+	reasons := append([]string(nil), est.Reasons...)
+	if est.Files > 0 {
+		reasons = append(reasons, fmt.Sprintf("预估改动 %d 个文件 / %d 行", est.Files, est.Lines))
+	}
+	return Result{Level: lvl, Reasons: reasons, ModelUsed: true, Usage: resp.Usage}, nil
 }
 
 // Combine 取两个结果中更保守的一个，并保留双方理由。

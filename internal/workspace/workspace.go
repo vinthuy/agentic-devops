@@ -79,14 +79,38 @@ func (m *Manager) Create(repoName string, repo config.RepoConfig, taskID, slugSo
 	return Info{Path: path, Branch: branch, BaseSHA: base}, nil
 }
 
-func (m *Manager) StageAll(info Info) error {
-	_, err := Git(info.Path, "add", "-A")
-	return err
+// StageAll 暂存全部改动，并把工具生成的产物移出暂存区。
+//
+// 移出而不是删除：产物仍留在工作区（可能是验证命令生成的），只是不进提交。
+// 返回被排除的相对路径，便于调用方在报告中说明，避免“悄悄就不见了”。
+func (m *Manager) StageAll(info Info) ([]string, error) {
+	if _, err := Git(info.Path, "add", "-A"); err != nil {
+		return nil, err
+	}
+	staged, err := Git(info.Path, "diff", "--cached", "--name-only")
+	if err != nil {
+		return nil, err
+	}
+	var excluded []string
+	for _, line := range strings.Split(staged, "\n") {
+		rel := strings.TrimSpace(line)
+		if rel != "" && IsGeneratedArtifact(rel) {
+			excluded = append(excluded, rel)
+		}
+	}
+	if len(excluded) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"reset", "-q", "--"}, excluded...)
+	if _, err := Git(info.Path, args...); err != nil {
+		return nil, err
+	}
+	return excluded, nil
 }
 
 // ChangedFiles 返回相对基线提交的改动列表。
 func (m *Manager) ChangedFiles(info Info) ([]FileChange, error) {
-	if err := m.StageAll(info); err != nil {
+	if _, err := m.StageAll(info); err != nil {
 		return nil, err
 	}
 	out, err := Git(info.Path, "diff", "--cached", "--name-status", info.BaseSHA)
@@ -107,32 +131,34 @@ func (m *Manager) ChangedFiles(info Info) ([]FileChange, error) {
 }
 
 func (m *Manager) Diff(info Info) (string, error) {
-	if err := m.StageAll(info); err != nil {
+	if _, err := m.StageAll(info); err != nil {
 		return "", err
 	}
 	return Git(info.Path, "diff", "--cached", "--no-color", info.BaseSHA)
 }
 
 // Commit 提交当前改动并返回 SHA；没有改动时返回空字符串。
-func (m *Manager) Commit(info Info, message string) (string, error) {
-	if err := m.StageAll(info); err != nil {
-		return "", err
+// excluded 为被排除的生成产物相对路径（见 StageAll）。
+func (m *Manager) Commit(info Info, message string) (string, []string, error) {
+	excluded, err := m.StageAll(info)
+	if err != nil {
+		return "", nil, err
 	}
 	staged, err := Git(info.Path, "diff", "--cached", "--name-only")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if strings.TrimSpace(staged) == "" {
-		return "", nil
+		return "", excluded, nil
 	}
 	if _, err := Git(info.Path,
 		"-c", "user.name="+m.cfg.GitAuthorName,
 		"-c", "user.email="+m.cfg.GitAuthorEmail,
 		"commit", "-m", message); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	sha, err := Git(info.Path, "rev-parse", "HEAD")
-	return strings.TrimSpace(sha), err
+	return strings.TrimSpace(sha), excluded, err
 }
 
 // Remove 删除 worktree；keepBranch 为 false 时同时删除分支。

@@ -53,6 +53,31 @@ func New(p *policy.Engine, maxOutput, commandTimeoutS int, hook ViolationHook) *
 	}
 }
 
+// CommandHelp 返回给模型看的可用命令清单。
+//
+// run_command 只允许执行白名单内的命令；如果不把清单显式告诉模型，模型会反复
+// 试 `pytest`、`python test_x.py` 之类被拒绝的写法，白白烧掉轮次和费用。
+func (r *Runtime) CommandHelp() string {
+	var b strings.Builder
+	if verify := r.policy.Repo.VerifyCommands; len(verify) > 0 {
+		b.WriteString("验证命令（由仓库配置，运行时会据此复核验收标准）：\n")
+		for _, c := range verify {
+			fmt.Fprintf(&b, "- %s: %s\n", c.Name, c.Command)
+		}
+	}
+	if allowed := r.policy.Repo.AllowedCommands; len(allowed) > 0 {
+		b.WriteString("其他允许的命令（前缀匹配）：\n")
+		for _, c := range allowed {
+			fmt.Fprintf(&b, "- %s\n", c)
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	b.WriteString("除上表之外，run_command 会拒绝执行任何命令。")
+	return b.String()
+}
+
 // Schemas 返回 Anthropic Messages API 的 tools 定义。
 func (r *Runtime) Schemas() []map[string]any {
 	return []map[string]any{
@@ -99,7 +124,7 @@ func (r *Runtime) Schemas() []map[string]any {
 		},
 		{
 			"name":        "run_command",
-			"description": "在工作区根目录执行白名单中的命令。不支持管道、重定向和组合命令。",
+			"description": "在工作区根目录执行命令。只允许 <allowed_commands> 中列出的命令，且必须原样使用；不支持管道、重定向和组合命令。",
 			"input_schema": obj(map[string]any{
 				"command": prop("string"),
 			}, "command"),

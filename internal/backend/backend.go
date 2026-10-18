@@ -62,5 +62,10 @@ func UserMessage(ctx StepContext) string {
 	if ctx.FailureSummary != "" {
 		parts = append(parts, fmt.Sprintf("<failure_summary trusted=\"false\">\n%s\n</failure_summary>", ctx.FailureSummary))
 	}
+	if ctx.Tools != nil {
+		if help := ctx.Tools.CommandHelp(); help != "" {
+			parts = append(parts, fmt.Sprintf("<allowed_commands trusted=\"true\">\n%s\n</allowed_commands>", help))
+		}
+	}
 	return strings.Join(parts, "\n\n")
 }

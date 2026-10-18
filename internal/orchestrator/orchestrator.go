@@ -184,6 +184,7 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 
 	var (
 		result triage.Result
+		source = "rules"
 	)
 	switch {
 	case task.LevelOverride && task.Level != "":
@@ -192,6 +193,7 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 			return task, perr
 		}
 		result = triage.Result{Level: lvl, Reasons: []string{"用户通过 --level 显式指定"}}
+		source = "user_override"
 	default:
 		result = triage.Rules(task.Requirement, repo)
 		if o.cfg.Triage.UseModel && o.model != nil && result.Level < triage.L {
@@ -209,8 +211,14 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 					return task, uerr
 				}
 				result = triage.Combine(result, est)
+				source = "rules+model"
 			}
 		}
+	}
+	if err := o.store.AppendEvent(task.ID, "triage_ready", map[string]any{
+		"source": source, "model_used": result.ModelUsed, "level": result.Level.String(),
+	}); err != nil {
+		return task, err
 	}
 
 	payload := map[string]any{
@@ -245,6 +253,7 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 	}
 
 	planner := o.planner
+	planSource := "configured_planner"
 	if planner == nil && o.cfg.Planning.Mode == "auto" && o.model != nil {
 		planner = &planning.ModelPlanner{
 			Client: o.model, Model: o.modelName, MaxTokens: o.maxTokens,
@@ -252,6 +261,9 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 				_ = o.recordUsage(task.ID, role, o.modelName, u)
 			},
 		}
+		planSource = "model"
+	} else if planner == nil {
+		planSource = "static"
 	}
 
 	plan, err := planWith(planner, req)
@@ -263,9 +275,15 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 			return task, aerr
 		}
 		plan, err = planning.StaticPlanner{}.Plan(context.Background(), req)
+		planSource = "static_fallback"
 		if err != nil {
 			return task, err
 		}
+	} else if planner == nil {
+		planSource = "static"
+	}
+	if err := o.store.AppendEvent(task.ID, "plan_ready", map[string]any{"source": planSource}); err != nil {
+		return task, err
 	}
 	if o.model != nil {
 		if err := o.checkBudget(task.ID); err != nil {
@@ -458,9 +476,17 @@ func (o *Orchestrator) deliverStep(task store.Task, repo config.RepoConfig) (sto
 	if info.Path == "" {
 		return o.suspend(task, "任务缺少工作区信息，无法提交")
 	}
-	sha, err := o.ws.Commit(info, commitMessage(task))
+	sha, excluded, err := o.ws.Commit(info, commitMessage(task))
 	if err != nil {
 		return task, err
+	}
+	if len(excluded) > 0 {
+		// 生成产物被排除是正常行为，但要留痕：PR 里看不到它们必须是有理由的。
+		if eerr := o.store.AppendEvent(task.ID, "commit_artifacts_excluded", map[string]any{
+			"paths": excluded,
+		}); eerr != nil {
+			return task, eerr
+		}
 	}
 	if sha == "" {
 		return o.move(task, state.NeedsHuman, map[string]any{"reason": "没有可提交的改动"}, nil)

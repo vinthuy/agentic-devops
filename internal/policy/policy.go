@@ -207,5 +207,8 @@ func (e *Engine) CheckCommand(cmd string) error {
 			return nil
 		}
 	}
-	return violation("command", "命令不在白名单中: %s", stripped)
+	if len(allowed) == 0 {
+		return violation("command", "命令不在白名单中: %s（本仓库未配置任何可用命令）", stripped)
+	}
+	return violation("command", "命令不在白名单中: %s\n允许的命令: %s", stripped, strings.Join(allowed, " | "))
 }

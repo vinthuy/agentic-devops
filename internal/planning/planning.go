@@ -252,14 +252,13 @@ func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) 
 	}
 	b.WriteString("</repo_context>")
 
-	resp, err := p.Client.Messages(ctx, llm.Request{
-		Model:      p.Model,
-		MaxTokens:  p.MaxTokens,
-		System:     plannerPrompt,
-		Messages:   []any{map[string]any{"role": "user", "content": b.String()}},
-		Tools:      []map[string]any{submitPlanTool()},
-		ToolChoice: map[string]any{"type": "tool", "name": "submit_plan"},
-	})
+	resp, input, err := p.Client.CallTool(ctx, llm.Request{
+		Model:     p.Model,
+		MaxTokens: p.MaxTokens,
+		System:    plannerPrompt,
+		Messages:  []any{map[string]any{"role": "user", "content": b.String()}},
+		Tools:     []map[string]any{submitPlanTool()},
+	}, "submit_plan")
 	if err != nil {
 		return Plan{}, err
 	}
@@ -267,28 +266,18 @@ func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) 
 		p.OnUsage("planner", resp.Usage)
 	}
 
-	for _, raw := range resp.Content {
-		block, err := llm.ParseBlock(raw)
-		if err != nil {
-			continue
-		}
-		if block.Type != "tool_use" || block.Name != "submit_plan" {
-			continue
-		}
-		data, err := json.Marshal(block.Input)
-		if err != nil {
-			return Plan{}, err
-		}
-		var plan Plan
-		if err := json.Unmarshal(data, &plan); err != nil {
-			return Plan{}, fmt.Errorf("计划格式无法解析: %w", err)
-		}
-		if err := Validate(plan, nameSet(req.VerifyNames)); err != nil {
-			return Plan{}, fmt.Errorf("计划校验失败: %w", err)
-		}
-		return plan, nil
+	data, err := json.Marshal(input)
+	if err != nil {
+		return Plan{}, err
 	}
-	return Plan{}, fmt.Errorf("模型未调用 submit_plan 提交计划")
+	var plan Plan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return Plan{}, fmt.Errorf("计划格式无法解析: %w", err)
+	}
+	if err := Validate(plan, nameSet(req.VerifyNames)); err != nil {
+		return Plan{}, fmt.Errorf("计划校验失败: %w", err)
+	}
+	return plan, nil
 }
 
 func nameSet(names []string) map[string]bool {

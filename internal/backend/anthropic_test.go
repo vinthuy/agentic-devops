@@ -28,6 +28,16 @@ func newTools(t *testing.T) (*tools.Runtime, string) {
 	return tools.New(eng, 8000, 60, nil), root
 }
 
+func TestUserMessageListsConfiguredCommands(t *testing.T) {
+	rt, root := newTools(t)
+	message := UserMessage(StepContext{Requirement: "check this", Plan: "verify", Worktree: root, Tools: rt})
+	if !strings.Contains(message, "<allowed_commands trusted=\"true\">") ||
+		!strings.Contains(message, "v: go version") ||
+		!strings.Contains(message, "除上表之外") {
+		t.Fatalf("allowed commands missing from model context:\n%s", message)
+	}
+}
+
 func TestAnthropicRoundTripKeepsThinkingAndPairsToolResults(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
