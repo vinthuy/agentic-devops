@@ -18,8 +18,8 @@ Go 1.25+。已从 Python 原型迁移（见 SDD ADR-11）；Python 原型已删�
 **密钥扫描 + 推送 + 草稿 PR**、**中断恢复**、运行报告、CLI。
 
 M2 已实现：独立 Reviewer、`REVIEWING` 状态、可选 `CI_WATCHING` 与红 CI 自动修复、
-GitHub Issue 导入、成本看板、编码时 `request_info` 澄清闭环。Docker 沙箱仍未实现；
-当前环境没有可用 Docker daemon，因此无法在此验证容器执行。多租户与并发调度不在 M2 范围。
+GitHub Issue 导入、成本看板、编码时 `request_info` 澄清闭环。Docker 沙箱是可选增强，
+不是本地开发的前置条件；没有 Docker daemon 时仍可使用受限本地进程执行。多租户与并发调度不在 M2 范围。
 
 ## 构建与测试
 

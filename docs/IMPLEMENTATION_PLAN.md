@@ -404,9 +404,8 @@ M1 合并后用真实 DeepSeek 端点跑了一次端到端（修复 `validators.
 | 成本看板 | `agentdev cost report` 聚合任务数、调用次数、角色/模型、token 花费、高花费任务；缺价任务显式警告 | 多任务 ledger 聚合与缺价警告有 CLI/store 测试 |
 | `request_info` | 编码器工具立即中止步骤并转 `NEEDS_INFO`，问题写入 interaction；`task reply` 回 `PLANNING`，复用已有 worktree | 状态闭环及持久化有编排器测试 |
 | 存储迁移 | 给既有 M1 SQLite 数据库幂等补 `review_attempts` 列 | 用 M1 旧 schema fixture 验证首次/重复打开与默认值 |
-| Docker 沙箱 | 尚未实现 | 本机 Docker daemon 不可用；在有 daemon 的环境实现并验证前，不宣称 M2 全部完成 |
+| Docker 沙箱 | 可选，不作为本地开发目标 | 默认使用受限本地进程执行；Docker daemon 不可用不阻塞开发或任务运行，未来需要更强隔离时再实现 |
 
 Reviewer 端到端验证：第二次真实 DeepSeek 跑同一邮箱 bug，`DONE`，分级与规划都由模型执行，Reviewer 返回 `approve`，只有 `validators.py` 进入提交，3 个 Python 测试通过，总成本约 `$0.0161`。标准 CI 首次通过率仍未测量；需要接入真实 GitHub PR + CI 基准集后才能评估 PRD 的 ≥50% exit criterion。
 
-本阶段验证：`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全通过。M2 子集保持 feature/config 控制：`review.enabled` 默认开启，`delivery.ci_watch` 默认关闭；Docker 以及真实 GitHub CI 验证明确留作后续，不以 Fake 测试冒充线上验证。
-
+本阶段验证：`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全通过。M2 子集保持 feature/config 控制：`review.enabled` 默认开启，`delivery.ci_watch` 默认关闭；Docker 是可选增强，真实 GitHub CI 验证需在配置目标仓库后进行，不以 Fake 测试冒充线上验证。

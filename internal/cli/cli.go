@@ -50,7 +50,8 @@ func fail(code int, format string, args ...any) error {
 }
 
 type options struct {
-	home string
+	home        string
+	issueReader issueReader
 }
 
 // NewRoot 构造根命令。
@@ -265,7 +266,11 @@ func taskCreateCmd(opts *options) *cobra.Command {
 						return fail(ExitUsage, "无法确定 GitHub 仓库，请通过 --issue-repo owner/name 指定：%v", err)
 					}
 				}
-				issueData, err := fetchGitHubIssue(cmd.Context(), ghRepo, number)
+				reader := opts.issueReader
+				if reader == nil {
+					reader = ghIssueReader{}
+				}
+				issueData, err := reader.Read(cmd.Context(), ghRepo, number)
 				if err != nil {
 					return fail(ExitError, "读取 Issue 失败: %v", err)
 				}
@@ -356,6 +361,16 @@ type githubIssue struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
 	URL   string `json:"url"`
+}
+
+type issueReader interface {
+	Read(ctx context.Context, repo string, number int64) (githubIssue, error)
+}
+
+type ghIssueReader struct{}
+
+func (ghIssueReader) Read(ctx context.Context, repo string, number int64) (githubIssue, error) {
+	return fetchGitHubIssue(ctx, repo, number)
 }
 
 func fetchGitHubIssue(parent context.Context, repo string, number int64) (githubIssue, error) {

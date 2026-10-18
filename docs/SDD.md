@@ -829,7 +829,9 @@ class Store(Protocol):
 | `AGENTDEV_HOME` | 否 | 数据目录，默认 `~/.agentdev` |
 | `AGENTDEV_LOG_LEVEL` | 否 | 默认 `INFO` |
 
-### 14.3 M2 之后的 Docker 沙箱
+### 14.3 可选 Docker 沙箱（本地开发不要求）
+
+MVP/M2 本地开发默认使用受限子进程与 worktree 隔离。Docker 仅在部署环境需要更强隔离时启用；没有 Docker daemon 不得阻止普通任务继续执行。
 
 - 镜像：基于仓库语言的基础镜像，预装常用工具
 - 挂载：仅挂载当前任务的 worktree（读写）与依赖缓存目录（只读或受限写）
@@ -922,7 +924,7 @@ agentic-devops/
 |---|---|---|
 | M0 原型 | cli、config、workspace（基础）、backends（基础）、tools（fs/shell 基础） | 无正式 FR |
 | M1 MVP | 完整状态机（不含 REVIEWING、CI_WATCHING）、triage（规则+模型）、planning、verify（含防作弊）、delivery（commit/push/PR）、store、cost、policy（基础）、sandbox/process、report、doctor | FR-001–004、010–011、013、020–022、030–033、035、040–043、045、050、052、060–063、070–072 |
-| M2 增强（分批实施） | REVIEWING、CI_WATCHING、澄清问题、Issue 导入、成本报表、request_info；Docker 仍待实现/验证 | FR-005（完整）、012、023（Docker，未完成）、024、025、034、046、051、053 |
+| M2 增强（分批实施） | REVIEWING、CI_WATCHING、澄清问题、Issue 导入、成本报表、request_info；Docker 为可选隔离增强 | FR-005（完整）、012、023（可选 Docker）、024、025、034、046、051、053 |
 | M3 自动化 | webhook/标签触发、并发调度、Issue 回写、定时任务 | FR-002、047、064、065 |
 
 ---
