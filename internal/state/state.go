@@ -52,7 +52,7 @@ var base = map[Status]map[Status]bool{
 	Planning:         set(NeedsInfo, AwaitingApproval, Coding),
 	NeedsInfo:        set(Planning),
 	AwaitingApproval: set(Coding),
-	Coding:           set(Verifying),
+	Coding:           set(Verifying, NeedsInfo),
 	Verifying:        set(Coding, Reviewing, Committing),
 	Reviewing:        set(Coding, Committing),
 	Committing:       set(Pushed, Done),

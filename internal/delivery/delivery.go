@@ -108,6 +108,15 @@ func redact(s string) string {
 	return string(r[:4]) + strings.Repeat("*", len(r)-8) + string(r[len(r)-4:])
 }
 
+// RedactText 脱敏模型/CI 文本中命中的已知密钥格式，供事件、报告及回传上下文使用。
+// 文本不一定是 diff，故不复用 ScanDiff 的行/路径提取；只替换命中的 token 字符串。
+func RedactText(text string) string {
+	for _, rule := range secretRules {
+		text = rule.re.ReplaceAllStringFunc(text, redact)
+	}
+	return text
+}
+
 // RemoteExists 检查远端名是否已配置。
 func RemoteExists(worktree, remote string) (bool, error) {
 	out, err := workspace.Git(worktree, "remote")
@@ -143,26 +152,117 @@ type PRRequest struct {
 type PRResult struct {
 	Number int64  `json:"number"`
 	URL    string `json:"url"`
+	// Created 为 true 表示本次确实新建了 PR；false 表示更新了已有 PR。
+	Created bool `json:"created"`
 }
 
 // CodeHost 抽象 PR 托管平台，便于测试与后续接入 GitLab。
 type CodeHost interface {
 	Name() string
-	CreatePR(ctx context.Context, req PRRequest) (PRResult, error)
+	// EnsurePR 幂等地保证分支对应一个 PR：不存在则创建，已存在则更新标题与正文。
+	// CI 失败会回到 CODING 再走一遍交付流程，如果不幂等就会撞上
+	// “a pull request already exists”。
+	EnsurePR(ctx context.Context, req PRRequest) (PRResult, error)
 }
 
 // GHCli 通过 gh CLI 创建 PR。gh 使用当前用户的凭据，本项目不保存任何 token。
 type GHCli struct {
-	Path string // gh 可执行文件路径，空则用 PATH 中的 gh
+	Path   string // gh 可执行文件路径，空则用 PATH 中的 gh
+	Runner CommandRunner
+}
+
+// CommandRunner 允许测试替换 gh 子进程，同时保留正式实现走 exec.CommandContext。
+type CommandRunner interface {
+	Run(ctx context.Context, bin, dir string, args []string, stdin string) (stdout, stderr string, err error)
+}
+
+type ExecRunner struct{}
+
+func (ExecRunner) Run(ctx context.Context, bin, dir string, args []string, stdin string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = dir
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 func (g GHCli) Name() string { return "gh" }
 
-func (g GHCli) CreatePR(ctx context.Context, req PRRequest) (PRResult, error) {
-	bin := g.Path
-	if bin == "" {
-		bin = "gh"
+func (g GHCli) bin() string {
+	if g.Path != "" {
+		return g.Path
 	}
+	return "gh"
+}
+
+func (g GHCli) run(ctx context.Context, dir string, args []string, stdin string) (string, string, error) {
+	runner := g.Runner
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+	return runner.Run(ctx, g.bin(), dir, args, stdin)
+}
+
+func (g GHCli) EnsurePR(ctx context.Context, req PRRequest) (PRResult, error) {
+	existing, found, err := g.findPR(ctx, req.Worktree, req.Head)
+	if err != nil {
+		return PRResult{}, err
+	}
+	if found {
+		if err := g.editPR(ctx, req.Worktree, existing.Number, req.Title, req.Body); err != nil {
+			return PRResult{}, err
+		}
+		return existing, nil
+	}
+	return g.createPR(ctx, req)
+}
+
+// findPR 查找该分支已存在的 PR。gh pr view 在不存在时以非零码退出，
+// 这里只在明确的“没有 PR”提示下当作不存在，避免把鉴权失败误判成需要新建。
+func (g GHCli) findPR(ctx context.Context, worktree, head string) (PRResult, bool, error) {
+	stdout, stderr, err := g.run(ctx, worktree, []string{"pr", "view", head, "--json", "number,url"}, "")
+	if err != nil {
+		msg := strings.TrimSpace(stderr)
+		if isNoPRMessage(msg) {
+			return PRResult{}, false, nil
+		}
+		return PRResult{}, false, fmt.Errorf("gh pr view 失败: %s", msg)
+	}
+	var pr struct {
+		Number int64  `json:"number"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &pr); err != nil {
+		return PRResult{}, false, fmt.Errorf("解析 gh pr view 输出失败: %w", err)
+	}
+	if pr.Number == 0 {
+		return PRResult{}, false, nil
+	}
+	return PRResult{Number: pr.Number, URL: pr.URL}, true, nil
+}
+
+func isNoPRMessage(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "no pull requests found") ||
+		strings.Contains(lower, "no open pull requests")
+}
+
+func (g GHCli) editPR(ctx context.Context, worktree string, number int64, title, body string) error {
+	args := []string{"pr", "edit", strconv.FormatInt(number, 10),
+		"--title", title, "--body-file", "-"}
+	_, stderr, err := g.run(ctx, worktree, args, body)
+	if err != nil {
+		return fmt.Errorf("gh pr edit 失败: %s", strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
+func (g GHCli) createPR(ctx context.Context, req PRRequest) (PRResult, error) {
 	args := []string{"pr", "create",
 		"--base", req.Base,
 		"--head", req.Head,
@@ -172,23 +272,18 @@ func (g GHCli) CreatePR(ctx context.Context, req PRRequest) (PRResult, error) {
 	if req.Draft {
 		args = append(args, "--draft")
 	}
-	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Dir = req.Worktree
-	cmd.Stdin = strings.NewReader(req.Body)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return PRResult{}, fmt.Errorf("gh pr create 失败: %s", strings.TrimSpace(stderr.String()))
+	stdout, stderr, err := g.run(ctx, req.Worktree, args, req.Body)
+	if err != nil {
+		return PRResult{}, fmt.Errorf("gh pr create 失败: %s", strings.TrimSpace(stderr))
 	}
-	url := strings.TrimSpace(stdout.String())
+	url := strings.TrimSpace(stdout)
 	if i := strings.Index(url, "\n"); i >= 0 {
 		url = strings.TrimSpace(url[:i])
 	}
 	if url == "" {
 		return PRResult{}, errors.New("gh pr create 未返回 PR 地址")
 	}
-	return PRResult{Number: prNumberFromURL(url), URL: url}, nil
+	return PRResult{Number: prNumberFromURL(url), URL: url, Created: true}, nil
 }
 
 var prNumberRe = regexp.MustCompile(`/pull/(\d+)`)
@@ -210,14 +305,16 @@ func Available() bool {
 
 // Fake 供测试使用；记录收到的请求。
 type Fake struct {
-	Result   PRResult
-	Err      error
+	Result PRResult
+	Err    error
+	// Existing 为 true 时模拟“该分支已有 PR”，EnsurePR 应返回 Created=false。
+	Existing bool
 	Requests []PRRequest
 }
 
 func (f *Fake) Name() string { return "fake" }
 
-func (f *Fake) CreatePR(_ context.Context, req PRRequest) (PRResult, error) {
+func (f *Fake) EnsurePR(_ context.Context, req PRRequest) (PRResult, error) {
 	f.Requests = append(f.Requests, req)
 	if f.Err != nil {
 		return PRResult{}, f.Err
@@ -226,6 +323,7 @@ func (f *Fake) CreatePR(_ context.Context, req PRRequest) (PRResult, error) {
 	if res.URL == "" {
 		res = PRResult{Number: 1, URL: "https://example.invalid/pull/1"}
 	}
+	res.Created = !f.Existing
 	return res, nil
 }
 

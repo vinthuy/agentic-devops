@@ -442,7 +442,7 @@ func TestReportIncludesCostAndPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(data)
-	for _, want := range []string{"草稿 PR", host.Result.URL, "## 成本", "已用"} {
+	for _, want := range []string{"草稿 PR", host.Result.URL, "## 成本", "已用", "## CI 结果", "CI 监听未开启"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("报告缺少 %q:\n%s", want, content)
 		}

@@ -15,6 +15,7 @@ deny_command_patterns:
   - "\\bsudo\\b"
 
 max_fix_attempts: 3
+max_review_attempts: 2
 max_turns_per_step: 30
 tool_output_max_chars: 8000
 command_timeout_s: 300

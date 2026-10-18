@@ -59,10 +59,12 @@ type PolicyConfig struct {
 	DenyPaths           []string `yaml:"deny_paths"`
 	DenyCommandPatterns []string `yaml:"deny_command_patterns"`
 	MaxFixAttempts      int      `yaml:"max_fix_attempts"`
-	MaxTurnsPerStep     int      `yaml:"max_turns_per_step"`
-	ToolOutputMaxChars  int      `yaml:"tool_output_max_chars"`
-	CommandTimeoutS     int      `yaml:"command_timeout_s"`
-	TaskTimeoutMinutes  int      `yaml:"task_timeout_minutes"`
+	// MaxReviewAttempts 是 Reviewer 判定不通过后回到 CODING 的最大次数。
+	MaxReviewAttempts  int `yaml:"max_review_attempts"`
+	MaxTurnsPerStep    int `yaml:"max_turns_per_step"`
+	ToolOutputMaxChars int `yaml:"tool_output_max_chars"`
+	CommandTimeoutS    int `yaml:"command_timeout_s"`
+	TaskTimeoutMinutes int `yaml:"task_timeout_minutes"`
 }
 
 type ModelsConfig struct {
@@ -88,6 +90,12 @@ type DeliveryConfig struct {
 	BranchPrefix string `yaml:"branch_prefix"`
 	// DraftPR 为 true 时创建草稿 PR，绝不自动合并。
 	DraftPR bool `yaml:"draft_pr"`
+	// CIWatch 为 true 时在 PR 创建后轮询 CI 结果，失败则回传日志继续修复。
+	CIWatch          bool `yaml:"ci_watch"`
+	MaxCIAttempts    int  `yaml:"max_ci_attempts"`
+	CITimeoutMinutes int  `yaml:"ci_timeout_minutes"`
+	// CIPollSeconds 是轮询间隔。测试里通过 Orchestrator 选项覆盖为更短的值。
+	CIPollSeconds int `yaml:"ci_poll_seconds"`
 }
 
 // TriageConfig 控制分级策略。
@@ -102,6 +110,12 @@ type PlanningConfig struct {
 	Mode string `yaml:"mode"`
 }
 
+// ReviewConfig 控制独立审查（M2）。
+type ReviewConfig struct {
+	// Enabled 为 true 且存在模型时，VERIFYING 通过后进入 REVIEWING。
+	Enabled bool `yaml:"enabled"`
+}
+
 // App 是加载后的全部配置。
 type App struct {
 	Home           string
@@ -111,6 +125,7 @@ type App struct {
 	Delivery       DeliveryConfig
 	Triage         TriageConfig
 	Planning       PlanningConfig
+	Review         ReviewConfig
 	GitAuthorName  string
 	GitAuthorEmail string
 }
@@ -142,6 +157,7 @@ func defaults(home string) *App {
 			DenyPaths:           append([]string(nil), DefaultDenyPaths...),
 			DenyCommandPatterns: append([]string(nil), DefaultDenyCommandPatterns...),
 			MaxFixAttempts:      3,
+			MaxReviewAttempts:   2,
 			MaxTurnsPerStep:     30,
 			ToolOutputMaxChars:  8000,
 			CommandTimeoutS:     300,
@@ -154,9 +170,13 @@ func defaults(home string) *App {
 			BaseURL:   "https://api.deepseek.com/anthropic",
 			APIKeyEnv: "DEEPSEEK_API_KEY",
 		},
-		Delivery:       DeliveryConfig{Enabled: false, BranchPrefix: "agent/", DraftPR: true},
+		Delivery: DeliveryConfig{
+			Enabled: false, BranchPrefix: "agent/", DraftPR: true,
+			CIWatch: false, MaxCIAttempts: 2, CITimeoutMinutes: 30, CIPollSeconds: 60,
+		},
 		Triage:         TriageConfig{UseModel: true},
 		Planning:       PlanningConfig{Mode: "auto"},
+		Review:         ReviewConfig{Enabled: true},
 		GitAuthorName:  "agentdev",
 		GitAuthorEmail: "agentdev@localhost",
 	}
@@ -197,9 +217,13 @@ func Load(home string) (*App, error) {
 	// config.yaml 的分组用指针字段读取，只覆盖显式出现的键，避免未声明的字段被清零。
 	var fileCfg struct {
 		Delivery *struct {
-			Enabled      *bool   `yaml:"enabled"`
-			BranchPrefix *string `yaml:"branch_prefix"`
-			DraftPR      *bool   `yaml:"draft_pr"`
+			Enabled          *bool   `yaml:"enabled"`
+			BranchPrefix     *string `yaml:"branch_prefix"`
+			DraftPR          *bool   `yaml:"draft_pr"`
+			CIWatch          *bool   `yaml:"ci_watch"`
+			MaxCIAttempts    *int    `yaml:"max_ci_attempts"`
+			CITimeoutMinutes *int    `yaml:"ci_timeout_minutes"`
+			CIPollSeconds    *int    `yaml:"ci_poll_seconds"`
 		} `yaml:"delivery"`
 		Triage *struct {
 			UseModel *bool `yaml:"use_model"`
@@ -207,6 +231,9 @@ func Load(home string) (*App, error) {
 		Planning *struct {
 			Mode *string `yaml:"mode"`
 		} `yaml:"planning"`
+		Review *struct {
+			Enabled *bool `yaml:"enabled"`
+		} `yaml:"review"`
 		GitAuthorName  string `yaml:"git_author_name"`
 		GitAuthorEmail string `yaml:"git_author_email"`
 	}
@@ -223,12 +250,27 @@ func Load(home string) (*App, error) {
 		if d.DraftPR != nil {
 			app.Delivery.DraftPR = *d.DraftPR
 		}
+		if d.CIWatch != nil {
+			app.Delivery.CIWatch = *d.CIWatch
+		}
+		if d.MaxCIAttempts != nil {
+			app.Delivery.MaxCIAttempts = *d.MaxCIAttempts
+		}
+		if d.CITimeoutMinutes != nil {
+			app.Delivery.CITimeoutMinutes = *d.CITimeoutMinutes
+		}
+		if d.CIPollSeconds != nil {
+			app.Delivery.CIPollSeconds = *d.CIPollSeconds
+		}
 	}
 	if t := fileCfg.Triage; t != nil && t.UseModel != nil {
 		app.Triage.UseModel = *t.UseModel
 	}
 	if p := fileCfg.Planning; p != nil && p.Mode != nil {
 		app.Planning.Mode = *p.Mode
+	}
+	if r := fileCfg.Review; r != nil && r.Enabled != nil {
+		app.Review.Enabled = *r.Enabled
 	}
 	if fileCfg.GitAuthorName != "" {
 		app.GitAuthorName = fileCfg.GitAuthorName
@@ -273,6 +315,20 @@ func (a *App) Validate() error {
 	}
 	if a.Policy.MaxFixAttempts < 0 {
 		problems = append(problems, "max_fix_attempts 不能为负数")
+	}
+	if a.Policy.MaxReviewAttempts < 0 {
+		problems = append(problems, "max_review_attempts 不能为负数")
+	}
+	if a.Delivery.MaxCIAttempts < 0 {
+		problems = append(problems, "delivery.max_ci_attempts 不能为负数")
+	}
+	if a.Delivery.CIWatch {
+		if a.Delivery.CITimeoutMinutes <= 0 {
+			problems = append(problems, "delivery.ci_timeout_minutes 必须大于 0（已开启 ci_watch）")
+		}
+		if a.Delivery.CIPollSeconds <= 0 {
+			problems = append(problems, "delivery.ci_poll_seconds 必须大于 0（已开启 ci_watch）")
+		}
 	}
 	switch a.Planning.Mode {
 	case "auto", "static":

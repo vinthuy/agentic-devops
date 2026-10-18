@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -16,6 +17,79 @@ func openTemp(t *testing.T) *SQLiteStore {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+// M1 已创建的库没有 review_attempts；Open 必须幂等地补列，且旧任务默认 0。
+func TestOpenMigratesReviewAttemptsColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE tasks (
+		id TEXT PRIMARY KEY, repo TEXT NOT NULL, title TEXT, requirement TEXT NOT NULL,
+		source TEXT NOT NULL DEFAULT 'cli', source_ref TEXT, level TEXT, level_override INTEGER NOT NULL DEFAULT 0,
+		status TEXT NOT NULL, previous_status TEXT, plan_json TEXT, branch TEXT, worktree_path TEXT,
+		base_sha TEXT, commit_sha TEXT, pr_number INTEGER, pr_url TEXT,
+		fix_attempts INTEGER NOT NULL DEFAULT 0, ci_attempts INTEGER NOT NULL DEFAULT 0,
+		budget_usd REAL NOT NULL, spent_usd REAL NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("打开旧库并迁移失败: %v", err)
+	}
+	defer s.Close()
+	task, err := s.CreateTask(NewTask{Repo: "acme/app", Requirement: "x", BudgetUSD: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.ReviewAttempts != 0 {
+		t.Errorf("新列应默认为 0，实际 %d", task.ReviewAttempts)
+	}
+	// 再次打开是安全的，不得重复 ALTER。
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("重复迁移不幂等: %v", err)
+	}
+	_ = s2.Close()
+}
+
+func TestListAllCostsIncludesTaskIDs(t *testing.T) {
+	s := openTemp(t)
+	a := create(t, s, "acme/a")
+	b := create(t, s, "acme/b")
+	if err := s.RecordCost(a.ID, "coder", "model-a", CostEntry{
+		InputTokens: 10, OutputTokens: 2, CostUSD: 0.01,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordCost(b.ID, "reviewer", "model-b", CostEntry{
+		InputTokens: 20, OutputTokens: 3, CostUSD: 0.02,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.ListAllCosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].TaskID != a.ID || all[1].TaskID != b.ID {
+		t.Fatalf("成本看板应包含 task ID 且按写入顺序返回: %+v", all)
+	}
+	one, err := s.ListCosts(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 1 || one[0].TaskID != a.ID {
+		t.Errorf("任务成本明细应返回 task ID: %+v", one)
+	}
 }
 
 func create(t *testing.T, s *SQLiteStore, repo string) Task {

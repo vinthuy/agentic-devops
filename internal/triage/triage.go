@@ -125,9 +125,13 @@ type estimate struct {
 }
 
 // Estimate 返回模型给出的分级与理由。任何未识别的取值都按 S 处理，避免误升。
-func (m *ModelEstimator) Estimate(ctx context.Context, requirement string, repo config.RepoConfig) (Result, error) {
+func (m *ModelEstimator) Estimate(ctx context.Context, requirement string, repo config.RepoConfig, source ...string) (Result, error) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "<task_requirement source=\"user\">\n%s\n</task_requirement>\n\n", requirement)
+	tag, trusted := "user", true
+	if len(source) > 0 && source[0] == "issue" {
+		tag, trusted = "issue", false
+	}
+	fmt.Fprintf(&b, "<task_requirement source=\"%s\" trusted=\"%t\">\n%s\n</task_requirement>\n\n", tag, trusted, requirement)
 	b.WriteString("<repo_context trusted=\"true\">\n")
 	fmt.Fprintf(&b, "默认分支: %s\n", repo.DefaultBranch)
 	if len(repo.SensitivePaths) > 0 {
@@ -148,7 +152,7 @@ func (m *ModelEstimator) Estimate(ctx context.Context, requirement string, repo 
 		Tools:     []map[string]any{submitEstimateTool()},
 	}, "submit_estimate")
 	if err != nil {
-		return Result{}, err
+		return Result{Usage: resp.Usage}, err
 	}
 
 	data, err := json.Marshal(input)

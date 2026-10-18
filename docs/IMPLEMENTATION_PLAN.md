@@ -393,4 +393,20 @@ M1 合并后用真实 DeepSeek 端点跑了一次端到端（修复 `validators.
 
 同时修正规划提示词：`grep` 验收模式必须能区分修复前后（首次真实运行中模型给出 `[A-Za-z0-9._%+-]+`，会匹配 `import re`，修复前也能通过）。
 
+## 11. M2 可验证子集（当前实现）
+
+| 子项 | 实现 | 状态 / 验证 |
+|---|---|---|
+| 独立 Reviewer | `internal/review`：结构化 verdict、只允许四类阻塞问题、finding 指向文件/行；独立计数与成本角色；失败挂起而非回炉 | fake reviewer 覆盖 approve、request_changes、上限、模型/接口失败；真实 DeepSeek 端到端通过 Reviewer |
+| CI 闭环 | `PR_OPENED → CI_WATCHING`；`gh pr checks` 60 秒轮询/30 分钟超时；无 CI 明确记录；失败拉取 `gh run view --log-failed` 尾部日志，回到 CODING，复用 PR 并更新正文 | FakeCI 覆盖通过、无 CI、失败修复、上限、超时；GhCli 用 Runner 替身验证检查解析、日志和无检查结果。由于当前项目未配置 GitHub remote，未对目标仓库做真实推送/CI 闭环 |
+| PR 幂等 | `CodeHost.EnsurePR` 先按 head 查 PR，存在则 `gh pr edit` 更新标题/正文，不存在才 create | 覆盖已有 PR、首次创建、鉴权错误不误判成“PR 不存在” |
+| Issue 导入 | `task create --issue N` 通过已认证 `gh issue view` 导入标题/正文；`--issue-repo` 覆盖；Issue 正文在 triage/planner/coder/reviewer 上下文中均标为不可信 | URL 解析、参数互斥与编号校验有测试；真实 Issue 导入尚未执行（避免擅自选取用户 Issue） |
+| 成本看板 | `agentdev cost report` 聚合任务数、调用次数、角色/模型、token 花费、高花费任务；缺价任务显式警告 | 多任务 ledger 聚合与缺价警告有 CLI/store 测试 |
+| `request_info` | 编码器工具立即中止步骤并转 `NEEDS_INFO`，问题写入 interaction；`task reply` 回 `PLANNING`，复用已有 worktree | 状态闭环及持久化有编排器测试 |
+| 存储迁移 | 给既有 M1 SQLite 数据库幂等补 `review_attempts` 列 | 用 M1 旧 schema fixture 验证首次/重复打开与默认值 |
+| Docker 沙箱 | 尚未实现 | 本机 Docker daemon 不可用；在有 daemon 的环境实现并验证前，不宣称 M2 全部完成 |
+
+Reviewer 端到端验证：第二次真实 DeepSeek 跑同一邮箱 bug，`DONE`，分级与规划都由模型执行，Reviewer 返回 `approve`，只有 `validators.py` 进入提交，3 个 Python 测试通过，总成本约 `$0.0161`。标准 CI 首次通过率仍未测量；需要接入真实 GitHub PR + CI 基准集后才能评估 PRD 的 ≥50% exit criterion。
+
+本阶段验证：`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全通过。M2 子集保持 feature/config 控制：`review.enabled` 默认开启，`delivery.ci_watch` 默认关闭；Docker 以及真实 GitHub CI 验证明确留作后续，不以 Fake 测试冒充线上验证。
 

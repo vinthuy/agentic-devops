@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     pr_url          TEXT,
     fix_attempts    INTEGER NOT NULL DEFAULT 0,
     ci_attempts     INTEGER NOT NULL DEFAULT 0,
+    review_attempts INTEGER NOT NULL DEFAULT 0,
     budget_usd      REAL NOT NULL,
     spent_usd       REAL NOT NULL DEFAULT 0,
     version         INTEGER NOT NULL DEFAULT 0,
@@ -109,7 +110,7 @@ var updatableFields = map[string]bool{
 	"requirement":     true,
 	"previous_status": true, "plan_json": true, "branch": true, "worktree_path": true,
 	"base_sha": true, "commit_sha": true, "pr_number": true, "pr_url": true,
-	"fix_attempts": true, "ci_attempts": true, "budget_usd": true, "spent_usd": true,
+	"fix_attempts": true, "ci_attempts": true, "review_attempts": true, "budget_usd": true, "spent_usd": true,
 	"finished_at": true,
 }
 
@@ -133,6 +134,7 @@ type Task struct {
 	PRURL          string
 	FixAttempts    int
 	CIAttempts     int
+	ReviewAttempts int
 	BudgetUSD      float64
 	SpentUSD       float64
 	Version        int64
@@ -177,6 +179,7 @@ type Verification struct {
 
 // CostEntry 是一次模型调用的计费记录。
 type CostEntry struct {
+	TaskID           string  `json:"task_id,omitempty"`
 	TS               string  `json:"ts"`
 	Role             string  `json:"role"`
 	Model            string  `json:"model"`
@@ -209,6 +212,7 @@ type Repository interface {
 	ListVerifications(taskID string) ([]Verification, error)
 	RecordCost(taskID, role, model string, entry CostEntry) error
 	ListCosts(taskID string) ([]CostEntry, error)
+	ListAllCosts() ([]CostEntry, error)
 	AddSpend(taskID string, delta float64) error
 	RecordInteraction(taskID, kind, content string) error
 	ListInteractions(taskID string) ([]Interaction, error)
@@ -233,7 +237,53 @@ func Open(path string) (*SQLiteStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("初始化数据库失败: %w", err)
 	}
+	if err := migrateColumns(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &SQLiteStore{db: db}, nil
+}
+
+// requiredColumns 是后续版本新增的列。`CREATE TABLE IF NOT EXISTS` 不会给已存在
+// 的表补列，因此老库（例如 M1 创建的库）需要显式 ALTER；先查 PRAGMA 再补，
+// 重复启动是安全的。
+var requiredColumns = []struct {
+	name string
+	ddl  string
+}{
+	{"review_attempts", "ALTER TABLE tasks ADD COLUMN review_attempts INTEGER NOT NULL DEFAULT 0"},
+}
+
+func migrateColumns(db *sql.DB) error {
+	have := map[string]bool{}
+	rows, err := db.Query("PRAGMA table_info(tasks)")
+	if err != nil {
+		return fmt.Errorf("读取 tasks 表结构失败: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("解析 tasks 表结构失败: %w", err)
+		}
+		have[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, c := range requiredColumns {
+		if have[c.name] {
+			continue
+		}
+		if _, err := db.Exec(c.ddl); err != nil {
+			return fmt.Errorf("迁移列 %s 失败: %w", c.name, err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) Close() error { return s.db.Close() }
@@ -288,7 +338,7 @@ func orDefault(v, d string) string {
 
 const taskColumns = `id, repo, title, requirement, source, source_ref, level, level_override, status,
 	previous_status, plan_json, branch, worktree_path, base_sha, commit_sha, pr_number, pr_url,
-	fix_attempts, ci_attempts, budget_usd, spent_usd, version, created_at, updated_at, finished_at`
+	fix_attempts, ci_attempts, review_attempts, budget_usd, spent_usd, version, created_at, updated_at, finished_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -305,7 +355,8 @@ func scanTask(r rowScanner) (Task, error) {
 	)
 	err := r.Scan(&t.ID, &t.Repo, &title, &t.Requirement, &t.Source, &sourceRef, &level, &levelOverride,
 		&status, &prev, &plan, &branch, &wt, &base, &commit, &prNumber, &prURL,
-		&t.FixAttempts, &t.CIAttempts, &t.BudgetUSD, &t.SpentUSD, &t.Version, &t.CreatedAt, &t.UpdatedAt, &finished)
+		&t.FixAttempts, &t.CIAttempts, &t.ReviewAttempts, &t.BudgetUSD, &t.SpentUSD,
+		&t.Version, &t.CreatedAt, &t.UpdatedAt, &finished)
 	if err != nil {
 		return Task{}, err
 	}
@@ -370,7 +421,7 @@ func (s *SQLiteStore) NextQueued() (Task, bool, error) {
 // RunnableStatuses 是可以被编排器继续推进的状态集合（含恢复场景）。
 var RunnableStatuses = []state.Status{
 	state.Queued, state.Triaging, state.Planning, state.Coding, state.Verifying,
-	state.Committing, state.Pushed, state.PROpened,
+	state.Reviewing, state.Committing, state.Pushed, state.PROpened, state.CIWatching,
 }
 
 // NextRunnable 取下一个可推进的任务：新任务或上次中断在中间状态的任务。
@@ -603,7 +654,7 @@ func orNow(ts string) string {
 
 func (s *SQLiteStore) ListCosts(taskID string) ([]CostEntry, error) {
 	rows, err := s.db.Query(
-		`SELECT ts, role, model, input_tokens, output_tokens, cache_read_tokens,
+		`SELECT task_id, ts, role, model, input_tokens, output_tokens, cache_read_tokens,
 		 cache_write_tokens, cost_usd FROM cost_ledger WHERE task_id = ? ORDER BY id`, taskID)
 	if err != nil {
 		return nil, err
@@ -612,7 +663,27 @@ func (s *SQLiteStore) ListCosts(taskID string) ([]CostEntry, error) {
 	var out []CostEntry
 	for rows.Next() {
 		var e CostEntry
-		if err := rows.Scan(&e.TS, &e.Role, &e.Model, &e.InputTokens, &e.OutputTokens,
+		if err := rows.Scan(&e.TaskID, &e.TS, &e.Role, &e.Model, &e.InputTokens, &e.OutputTokens,
+			&e.CacheReadTokens, &e.CacheWriteTokens, &e.CostUSD); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ListAllCosts 返回所有模型调用记录，用于成本看板聚合。
+func (s *SQLiteStore) ListAllCosts() ([]CostEntry, error) {
+	rows, err := s.db.Query(`SELECT task_id, ts, role, model, input_tokens, output_tokens,
+		cache_read_tokens, cache_write_tokens, cost_usd FROM cost_ledger ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CostEntry
+	for rows.Next() {
+		var e CostEntry
+		if err := rows.Scan(&e.TaskID, &e.TS, &e.Role, &e.Model, &e.InputTokens, &e.OutputTokens,
 			&e.CacheReadTokens, &e.CacheWriteTokens, &e.CostUSD); err != nil {
 			return nil, err
 		}

@@ -216,7 +216,7 @@ func (c *Client) CallTool(ctx context.Context, req Request, toolName string) (Re
 		cur.Messages = base
 		resp, err := c.Messages(ctx, cur)
 		if err != nil {
-			return Response{}, nil, err
+			return total, nil, err
 		}
 		total.Usage = total.Usage.Add(resp.Usage)
 		total.Content = resp.Content

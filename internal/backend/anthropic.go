@@ -53,6 +53,22 @@ func (a *Anthropic) RunStep(ctx StepContext) (StepResult, error) {
 		// 助手内容块原样回传，保留思考块及其签名，多轮工具调用才能被模型正确接续。
 		messages = append(messages, map[string]any{"role": "assistant", "content": resp.Content})
 
+		// 澄清是控制流，不是普通工具副作用。先扫完整批 tool_use：若同一批次里
+		// 同时出现 request_info 与 write/edit，优先暂停，不能因块顺序先执行写入。
+		for _, raw := range resp.Content {
+			block, err := llm.ParseBlock(raw)
+			if err != nil {
+				return StepResult{}, Errorf("无法解析内容块: %v", err)
+			}
+			if block.Type != "tool_use" || block.Name != "request_info" {
+				continue
+			}
+			res := ctx.Tools.Execute(block.Name, block.Input)
+			if len(res.InfoQuestions) > 0 {
+				return StepResult{}, &InfoNeededError{Questions: res.InfoQuestions}
+			}
+		}
+
 		var texts []string
 		var results []any
 		for _, raw := range resp.Content {
@@ -65,6 +81,9 @@ func (a *Anthropic) RunStep(ctx StepContext) (StepResult, error) {
 				texts = append(texts, block.Text)
 			case "tool_use":
 				res := ctx.Tools.Execute(block.Name, block.Input)
+				if len(res.InfoQuestions) > 0 {
+					return StepResult{}, &InfoNeededError{Questions: res.InfoQuestions}
+				}
 				results = append(results, map[string]any{
 					"type":        "tool_result",
 					"tool_use_id": block.ID,

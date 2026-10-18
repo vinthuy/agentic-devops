@@ -22,14 +22,15 @@ type Degradation struct {
 // degradationLabels 的键是事件类型。只有出现在这里的类型才会被当成需要人工
 // 注意的降级；其余事件（state_changed、step_finished 等）属于正常流程。
 var degradationLabels = map[string]string{
-	"triage_model_failed":       "分级模型调用失败，本次仅按规则分级",
-	"plan_failed":               "模型规划失败，已降级为静态计划（验收标准仅来自验证命令）",
-	"plan_scope_unrestricted":   "计划未限定改动范围，写入仅受全局策略约束",
-	"cost_pricing_missing":      "缺少模型单价，调用按 $0 计，预算熔断对此无效",
-	"budget_warning":            "花费接近预算上限",
-	"secret_scan_failed":        "密钥扫描命中，已阻止推送",
-	"anticheat":                 "防作弊检查命中，已转人工",
-	"commit_artifacts_excluded": "已排除工具生成的产物，未进入提交",
+	"triage_model_failed":     "分级模型调用失败，本次仅按规则分级",
+	"plan_failed":             "模型规划失败，已降级为静态计划（验收标准仅来自验证命令）",
+	"plan_scope_unrestricted": "计划未限定改动范围，写入仅受全局策略约束",
+	"cost_pricing_missing":    "缺少模型单价，调用按 $0 计，预算熔断对此无效",
+	"budget_warning":          "花费接近预算上限",
+	"review_failed":           "独立审查执行失败，结果已挂起等待人工",
+	"ci_failed":               "CI 检查失败，已将结果交给自动修复",
+	"secret_scan_failed":      "密钥扫描命中，已阻止推送",
+	"anticheat":               "防作弊检查命中，已转人工",
 }
 
 // Degradations 按时间顺序返回需要人工注意的降级与异常。
@@ -61,6 +62,40 @@ func (d Degradation) SummaryLine() string {
 	return fmt.Sprintf("%s: %s（%s）", d.Type, d.Label, d.Detail)
 }
 
+// EventDetail 返回 task status 与报告时间线使用的安全、精简摘要。
+// 不直接序列化整个 payload，避免把长 CI 日志或任意外部内容塞进终端。
+func EventDetail(e store.Event) string {
+	for _, d := range Degradations([]store.Event{e}) {
+		if d.Detail == "" {
+			return d.Label
+		}
+		return d.Label + "：" + d.Detail
+	}
+	p := e.Payload
+	switch e.Type {
+	case "triage_ready":
+		return fmt.Sprintf("来源 %s，级别 %s", payloadString(p, "source"), payloadString(p, "level"))
+	case "plan_ready":
+		return "计划来源 " + payloadString(p, "source")
+	case "review_result":
+		return fmt.Sprintf("%s：%s（%d 条意见）", payloadString(p, "decision"),
+			truncate(payloadString(p, "summary"), 160), len(payloadItems(p, "findings")))
+	case "state_changed":
+		if ci := payloadString(p, "ci"); ci != "" {
+			return ci + "：" + truncate(payloadString(p, "summary"), 160)
+		}
+		if reason := payloadString(p, "reason"); reason != "" {
+			return truncate(reason, 200)
+		}
+	case "fix_requested":
+		source := payloadString(p, "source")
+		if source != "" {
+			return "修复来源 " + source
+		}
+	}
+	return ""
+}
+
 // degradationDetail 从事件负载里挑出对人有用的一句话说明。
 // 负载结构按事件类型而定，拿不到就返回空串而不是报错——报告本身不能因为
 // 某条事件的负载不完整而失败。
@@ -69,13 +104,15 @@ func degradationDetail(e store.Event) string {
 	switch e.Type {
 	case "plan_failed", "triage_model_failed":
 		return truncate(payloadString(p, "error"), 300)
+	case "review_failed":
+		return truncate(payloadString(p, "error"), 300)
+	case "ci_failed":
+		return payloadString(p, "summary")
 	case "cost_pricing_missing":
 		return fmt.Sprintf("模型 %s。%s", payloadString(p, "model"), payloadString(p, "note"))
 	case "budget_warning":
 		return fmt.Sprintf("已用 $%.4f / 预算 $%.2f",
 			payloadFloat(p, "spent_usd"), payloadFloat(p, "budget_usd"))
-	case "commit_artifacts_excluded":
-		return "已排除: " + strings.Join(payloadStrings(p, "paths"), ", ")
 	case "plan_scope_unrestricted":
 		return payloadString(p, "note")
 	case "secret_scan_failed", "anticheat":

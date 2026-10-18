@@ -50,3 +50,28 @@ func TestReportRendersSourceAndDegradationProminently(t *testing.T) {
 		}
 	}
 }
+
+func TestReportShowsArtifactAuditAndReviewerDecision(t *testing.T) {
+	task := store.Task{ID: "t2", Source: "issue", SourceRef: "https://github.com/acme/app/issues/8"}
+	events := []store.Event{
+		{Type: "commit_artifacts_excluded", Payload: map[string]any{"paths": []any{"__pycache__/x.pyc"}}},
+		{Type: "review_result", Payload: map[string]any{
+			"decision": "request_changes", "summary": "边界错误",
+			"findings": []any{map[string]any{
+				"path": "a.go", "line": float64(9), "severity": "high", "comment": "索引越界",
+			}},
+		}},
+		{Type: "state_changed", Payload: map[string]any{"ci": "none", "summary": "无检查"}},
+	}
+	content := render(task, events, nil, nil, nil, "now")
+	for _, expected := range []string{
+		"来源: GitHub Issue https://github.com/acme/app/issues/8",
+		"## 提交审计", "__pycache__/x.pyc",
+		"## 独立审查", "request_changes", "a.go:9", "索引越界",
+		"## CI 结果", "none",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Errorf("report missing %q:\n%s", expected, content)
+		}
+	}
+}

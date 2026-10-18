@@ -35,6 +35,9 @@ type ViolationHook func(kind, detail string, blocked bool)
 type Result struct {
 	OK      bool
 	Content string
+	// InfoQuestions 非空表示模型调用了 request_info：步骤应立即暂停并进入
+	// NEEDS_INFO，把这些问题交给用户，而不是继续猜测。
+	InfoQuestions []string
 }
 
 type Runtime struct {
@@ -129,6 +132,16 @@ func (r *Runtime) Schemas() []map[string]any {
 				"command": prop("string"),
 			}, "command"),
 		},
+		{
+			"name":        "request_info",
+			"description": "当需求缺少必要信息、继续执行会有风险时调用：列出必须由用户澄清的具体问题。调用后本步骤立即暂停，进入等待澄清。",
+			"input_schema": obj(map[string]any{
+				"questions": map[string]any{
+					"type":  "array",
+					"items": prop("string"),
+				},
+			}, "questions"),
+		},
 	}
 }
 
@@ -164,19 +177,47 @@ func (r *Runtime) Execute(name string, args map[string]any) Result {
 		content, err = r.search(args)
 	case "run_command":
 		return r.runCommand(args)
+	case "request_info":
+		return requestInfo(args)
 	default:
-		return Result{false, "未知工具: " + name}
+		return Result{OK: false, Content: "未知工具: " + name}
 	}
 	if err != nil {
 		if v, ok := policy.IsViolation(err); ok {
 			if r.onViolation != nil {
 				r.onViolation(v.Kind, v.Detail, true)
 			}
-			return Result{false, fmt.Sprintf("策略拒绝 [%s]: %s", v.Kind, v.Detail)}
+			return Result{OK: false, Content: fmt.Sprintf("策略拒绝 [%s]: %s", v.Kind, v.Detail)}
 		}
-		return Result{false, err.Error()}
+		return Result{OK: false, Content: err.Error()}
 	}
-	return Result{true, content}
+	return Result{OK: true, Content: content}
+}
+
+// requestInfo 记录模型请求澄清的问题。执行器会据此立即暂停步骤。
+func requestInfo(args map[string]any) Result {
+	raw, ok := args["questions"].([]any)
+	if !ok {
+		return Result{OK: false, Content: "request_info 必须提供 questions 数组"}
+	}
+	var questions []string
+	for _, item := range raw {
+		s, ok := item.(string)
+		if !ok {
+			continue
+		}
+		if s = strings.TrimSpace(s); s != "" {
+			questions = append(questions, s)
+		}
+	}
+	if len(questions) == 0 {
+		return Result{OK: false, Content: "request_info 的 questions 不能为空"}
+	}
+	return Result{
+		OK:            true,
+		Content:       "已记录澄清问题，本步骤暂停等待用户回复。",
+		InfoQuestions: questions,
+	}
 }
 
 func strArg(args map[string]any, key string) (string, error) {
@@ -430,16 +471,16 @@ func walkFiles(base string, fn func(string) error) error {
 func (r *Runtime) runCommand(args map[string]any) Result {
 	command, err := strArg(args, "command")
 	if err != nil {
-		return Result{false, err.Error()}
+		return Result{OK: false, Content: err.Error()}
 	}
 	if err := r.policy.CheckCommand(command); err != nil {
 		if v, ok := policy.IsViolation(err); ok {
 			if r.onViolation != nil {
 				r.onViolation(v.Kind, v.Detail, true)
 			}
-			return Result{false, fmt.Sprintf("策略拒绝 [%s]: %s", v.Kind, v.Detail)}
+			return Result{OK: false, Content: fmt.Sprintf("策略拒绝 [%s]: %s", v.Kind, v.Detail)}
 		}
-		return Result{false, err.Error()}
+		return Result{OK: false, Content: err.Error()}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), r.cmdTimeout)
@@ -451,7 +492,7 @@ func (r *Runtime) runCommand(args map[string]any) Result {
 	cmd.Stderr = &buf
 	runErr := cmd.Run()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return Result{false, fmt.Sprintf("命令超时（>%s）: %s", r.cmdTimeout, command)}
+		return Result{OK: false, Content: fmt.Sprintf("命令超时（>%s）: %s", r.cmdTimeout, command)}
 	}
 	code := 0
 	if runErr != nil {
@@ -459,14 +500,14 @@ func (r *Runtime) runCommand(args map[string]any) Result {
 		if errors.As(runErr, &exitErr) {
 			code = exitErr.ExitCode()
 		} else {
-			return Result{false, "执行失败: " + runErr.Error()}
+			return Result{OK: false, Content: "执行失败: " + runErr.Error()}
 		}
 	}
 	body := Truncate(buf.String(), r.maxOutput)
 	if body == "" {
 		body = "(无输出)"
 	}
-	return Result{code == 0, fmt.Sprintf("exit=%d\n%s", code, body)}
+	return Result{OK: code == 0, Content: fmt.Sprintf("exit=%d\n%s", code, body)}
 }
 
 // ShellCommand 在当前平台的 shell 中构造命令（Windows 用 cmd /C，其他平台用 sh -c）。

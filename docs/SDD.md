@@ -169,12 +169,18 @@
 | VERIFYING | 失败, 修复次数 < 上限 | CODING | 回传失败摘要 |
 | VERIFYING | 失败, 修复次数 ≥ 上限 | NEEDS_HUMAN | — |
 | REVIEWING | 通过 | COMMITTING | — |
-| REVIEWING | 不通过, 次数 < 上限 | CODING | 回传审查意见 |
+| REVIEWING | 不通过, `review_attempts` < 上限 | CODING | 回传审查意见并递增审查修复计数 |
+| REVIEWING | 不通过, 已达上限 | NEEDS_HUMAN | 保存最后意见 |
 | COMMITTING | 提交成功 | PUSHED（需先过密钥扫描） | — |
 | COMMITTING | 密钥扫描命中 | NEEDS_HUMAN | 阻止提交 |
 | PUSHED | 创建 PR 成功 | PR_OPENED | 记录 PR 号与 URL |
-| PR_OPENED | CI 通过或未配置 CI | DONE | — |
-| PR_OPENED | CI 失败, 次数 < 上限 | CODING | 回传 CI 日志摘要 |
+| PR_OPENED | `ci_watch=false` | DONE | 记录 CI 未监听 |
+| PR_OPENED | `ci_watch=true` | CI_WATCHING | 开始轮询 |
+| CI_WATCHING | CI 通过 | DONE | — |
+| CI_WATCHING | 无 CI 配置 | DONE | 记录“未运行 CI” |
+| CI_WATCHING | CI 失败, `ci_attempts` < 上限 | CODING | 回传失败 job 日志摘要 |
+| CI_WATCHING | CI 失败, 已达上限 | NEEDS_HUMAN | 保留 PR，等待人工 |
+| CI_WATCHING | 轮询超时/gh 查询失败 | NEEDS_HUMAN | 保留 PR，等待人工 |
 | 任意活动状态 | 预算 ≥ 100% | NEEDS_HUMAN | 停止模型调用 |
 | 任意活动状态 | 超时 | NEEDS_HUMAN | — |
 | 任意非终态 | 用户 `cancel` | CANCELLED | 清理 worktree（可选保留分支） |
@@ -333,6 +339,22 @@ for ac in plan.acceptance:
 ### 5.7 CI 监听（M2）
 
 ```
+
+### 5.8 独立审查（M2）
+
+验证器全部通过后（`review.enabled=true` 且有模型时），工作流进入 `REVIEWING`：
+
+1. Reviewer 仅看到需求、计划、验收证据与最终 diff，不共享编码过程中的模型上下文。
+2. 只允许因需求未满足、正确性缺陷、安全问题、验证被削弱四类问题打回；风格/命名意见只能是 `low`，不得阻塞。
+3. `request_changes` 必须至少包含一个 `high` 或 `medium` finding，且每条都带 diff 文件路径；校验失败或模型调用失败不算代码不通过，转 `NEEDS_HUMAN`。
+4. 审查意见写入事件与运行报告，再作为 `failure_summary` 回传编码器；`review_attempts` 独立于验证修复次数计数，达到 `max_review_attempts` 后挂起。
+5. Reviewer 用量按 `reviewer` 角色记账，照常受预算熔断控制。
+
+### 5.9 澄清工具与 Issue 导入（M2）
+
+- 编码器可调用 `request_info(questions)`，程序立即暂停当前步骤、写入 `interactions`，并将任务转 `NEEDS_INFO`。用户通过 `task reply` 回复后回到 `PLANNING`；worktree 不重复创建。
+- `task create --issue N` 通过已认证的 `gh issue view` 读取标题/正文，不评论、不关闭 Issue。正文用 `source=issue, trusted=false` 包裹并在 triage、planner、coder、reviewer 提示词中视为不可信数据。`--issue-repo owner/name` 可覆盖从 git remote 推断出的仓库。
+- `cost report` 汇总所有任务、模型调用、角色/模型花费及高花费任务；缺单价的任务显式 `[WARN]`，不会把 `$0` 显示成“免费”。
 轮询：gh pr checks <PR号> --json ...，间隔 60s，超时 30min
 结果：
   - 全部通过 → DONE
@@ -368,6 +390,7 @@ CREATE TABLE tasks (
     pr_url          TEXT,
     fix_attempts    INTEGER DEFAULT 0,       -- 验证修复次数
     ci_attempts     INTEGER DEFAULT 0,
+    review_attempts INTEGER NOT NULL DEFAULT 0, -- Reviewer 要求修改的次数
     budget_usd      REAL NOT NULL,
     spent_usd       REAL NOT NULL DEFAULT 0,
     version         INTEGER NOT NULL DEFAULT 0,  -- 乐观锁
@@ -501,8 +524,21 @@ repos:
       - "jest.config.*"
       - ".eslintrc*"
     budget_usd: 2.0
-    pr_draft: true
-    ci_watch: false                    # M2 起可开启
+```
+
+实际运行时，PR 交付与 CI 监听位于 `config.yaml` 的 `delivery` 组；独立审查位于 `review` 组：
+
+```yaml
+delivery:
+  enabled: false
+  branch_prefix: "agent/"
+  draft_pr: true
+  ci_watch: false
+  max_ci_attempts: 2
+  ci_timeout_minutes: 30
+  ci_poll_seconds: 60
+review:
+  enabled: true
 ```
 
 ### 7.3 policy.yaml 示例
@@ -532,6 +568,7 @@ network:
 limits:
   max_concurrent_tasks: 2
   max_fix_attempts: 3
+  max_review_attempts: 2
   max_ci_attempts: 2
   max_turns_per_step: 30
   tool_output_max_chars: 8000
@@ -885,7 +922,7 @@ agentic-devops/
 |---|---|---|
 | M0 原型 | cli、config、workspace（基础）、backends（基础）、tools（fs/shell 基础） | 无正式 FR |
 | M1 MVP | 完整状态机（不含 REVIEWING、CI_WATCHING）、triage（规则+模型）、planning、verify（含防作弊）、delivery（commit/push/PR）、store、cost、policy（基础）、sandbox/process、report、doctor | FR-001–004、010–011、013、020–022、030–033、035、040–043、045、050、052、060–063、070–072 |
-| M2 增强 | sandbox/docker、REVIEWING、CI_WATCHING、澄清问题、Issue 导入、成本报表、request_info | FR-005（完整）、012、023（Docker）、024、025、034、046、051、053 |
+| M2 增强（分批实施） | REVIEWING、CI_WATCHING、澄清问题、Issue 导入、成本报表、request_info；Docker 仍待实现/验证 | FR-005（完整）、012、023（Docker，未完成）、024、025、034、046、051、053 |
 | M3 自动化 | webhook/标签触发、并发调度、Issue 回写、定时任务 | FR-002、047、064、065 |
 
 ---
@@ -911,8 +948,11 @@ agentic-devops/
 | ADR-15 | 计划、分级、验收标准都用**结构化工具调用**获取结构化输出 | 解析自由文本 JSON | 结构化输出可校验；计划在落地前必须通过 `Validate`，其中包含对选择器的 shell 元字符检查（纵深防御）。强制 `tool_choice` 只是首选手段而非前提：端点不支持时自动降级为“提示 + 校验”（见 ADR-17） |
 | ADR-16 | 编排器是“按当前状态推进一步”的循环驱动器 | 一次性跑完整条流程 | 每步一次状态转换，天然支持中断后 `resume`，也让审批/澄清这类挂起变得简单 |
 | ADR-17 | 强制 `tool_choice` 视为**可探测的能力**，不可用时去掉该参数重发并记住 | 假定所有兼容端点都支持强制工具调用 | DeepSeek 的 thinking 模式返回 `Thinking mode does not support this tool_choice`（HTTP 400）。真实端到端运行暴露该问题后，改为：首次探测 → 去掉 `tool_choice` 重试 → 记住能力；若模型改用文本回答，则追加一次“请调用工具”的提示。参数类错误（非“不支持”）仍原样暴露，不会被当成能力缺失悄悄绕开 |
-| ADR-18 | 一切降级（模型分级/规划失败、缺单价、排除生成产物）都必须在 CLI 与报告中**显式列出** | 只写事件、由人自行翻查 | 真实的首次端到端运行中，分级与规划都因 400 失败并静默降级为规则/静态计划，任务却照样报 `DONE`、报告看起来完全正常。降级结果与完整结果不可区分，直接违背“可审计、可信任”的前提。现在 CLI 输出 `[WARN]`，报告顶部有「降级与异常」小节，并给出分级/计划来源 |
+| ADR-18 | 一切影响结论可信度的降级（模型分级/规划失败、缺单价、CI 失败、Reviewer 故障）都必须在 CLI 与报告中**显式列出**；提交产物排除则单独审计 | 只写事件、由人自行翻查 | 真实的首次端到端运行中，分级与规划都因 400 失败并静默降级为规则/静态计划，任务却照样报 `DONE`、报告看起来完全正常。降级结果与完整结果不可区分，直接违背“可审计、可信任”的前提。现在 CLI 输出 `[WARN]`，报告顶部有「降级与异常」小节，并给出分级/计划来源；生成产物排除列在「提交审计」中，不把正常排除误报成故障 |
 | ADR-19 | 提交前把工具生成的产物（`__pycache__`、`*.pyc`、`node_modules` 等）移出暂存区，但保留在工作区 | 直接 `git add -A`；或直接删除产物 | 验证命令会在工作区生成缓存，首次端到端运行就把 `__pycache__/*.pyc` 提交进了 PR。移出暂存区而非删除：产物仍可供审计，且不改动用户仓库的 `.gitignore`；被排除的路径记入事件与报告 |
+| ADR-20 | Reviewer 只因需求、正确性、安全、验证完整性问题阻塞；接口失败则挂起人工 | 风格检查打回；Reviewer 失败时自动回炉 | Reviewer 是独立质量闸门，不是第二个编码模型的偏好投票；可验证 finding 才能驱动代码修改，避免模型故障造成无谓 diff |
+| ADR-21 | PR 交付使用 `EnsurePR`：按 head 查已有 PR，存在则 edit，不存在才 create | 每轮失败修复都创建新 PR | CI 失败回到 CODING 后，必须继续更新同一个 PR；鉴权/网络错误不得误判为 PR 不存在 |
+| ADR-22 | CI 查询只返回当前快照，由状态机按配置轮询；“无 checks”是独立结果，不等同于通过 | 让 `gh pr checks --watch` 阻塞单次命令；把空结果当成功 | 任务状态、超时与恢复仍由持久化状态机掌管；无 CI 必须在事件/报告中明确披露，避免把未执行的验证说成通过 |
 
 ---
 

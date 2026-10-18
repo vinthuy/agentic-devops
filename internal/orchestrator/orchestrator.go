@@ -19,6 +19,7 @@ import (
 	"agentdev/internal/planning"
 	"agentdev/internal/policy"
 	"agentdev/internal/report"
+	"agentdev/internal/review"
 	"agentdev/internal/state"
 	"agentdev/internal/store"
 	"agentdev/internal/tools"
@@ -41,7 +42,12 @@ type Orchestrator struct {
 	maxTokens  int
 	pricing    cost.Table
 	planner    planning.Planner
+	reviewer   review.Reviewer
 	codeHost   delivery.CodeHost
+	ciWatcher  delivery.CIWatcher
+	ciPoll     time.Duration
+	ciTimeout  time.Duration
+	sleep      func(context.Context, time.Duration) error
 	forceDelev bool
 
 	warnedPricing bool
@@ -71,17 +77,61 @@ func WithCodeHost(h delivery.CodeHost) Option {
 	return func(o *Orchestrator) { o.codeHost = h }
 }
 
+// WithReviewer 覆盖默认的 Reviewer（测试用）。
+func WithReviewer(r review.Reviewer) Option {
+	return func(o *Orchestrator) { o.reviewer = r }
+}
+
+// WithCIWatcher 覆盖默认的 CI 查询实现（测试用）。
+func WithCIWatcher(w delivery.CIWatcher) Option {
+	return func(o *Orchestrator) { o.ciWatcher = w }
+}
+
+// WithCITiming 覆盖 CI 轮询间隔与总超时（测试中设为极小值）。
+func WithCITiming(poll, timeout time.Duration) Option {
+	return func(o *Orchestrator) {
+		o.ciPoll = poll
+		o.ciTimeout = timeout
+	}
+}
+
 // WithDelivery 强制开启推送与创建 PR，用于覆盖 delivery.enabled。
 func WithDelivery(enabled bool) Option {
 	return func(o *Orchestrator) { o.forceDelev = enabled }
 }
 
 func New(repo store.Repository, cfg *config.App, be backend.ExecutionBackend, opts ...Option) *Orchestrator {
-	o := &Orchestrator{store: repo, cfg: cfg, backend: be, ws: workspace.New(cfg)}
+	o := &Orchestrator{
+		store: repo, cfg: cfg, backend: be, ws: workspace.New(cfg),
+		ciPoll:    time.Duration(cfg.Delivery.CIPollSeconds) * time.Second,
+		ciTimeout: time.Duration(cfg.Delivery.CITimeoutMinutes) * time.Minute,
+		sleep:     sleepCtx,
+	}
+	if o.ciPoll <= 0 {
+		o.ciPoll = 60 * time.Second
+	}
+	if o.ciTimeout <= 0 {
+		o.ciTimeout = 30 * time.Minute
+	}
 	for _, opt := range opts {
 		opt(o)
 	}
 	return o
+}
+
+// sleepCtx 等待指定时长，可被上下文取消。
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // RunTask 推进任务至终态或挂起。返回错误仅表示存储或前置条件问题；
@@ -145,12 +195,25 @@ func (o *Orchestrator) drive(task store.Task, repo config.RepoConfig) (store.Tas
 			task, err = o.codeStep(task, repo)
 		case state.Verifying:
 			task, err = o.verifyStep(task, repo)
+		case state.Reviewing:
+			task, err = o.reviewStep(task, repo)
 		case state.Committing:
 			task, err = o.deliverStep(task, repo)
 		case state.Pushed:
 			task, err = o.prStep(task, repo)
 		case state.PROpened:
-			task, err = o.move(task, state.Done, map[string]any{"reason": "PR 已创建"}, map[string]any{"finished_at": now()})
+			if o.cfg.Delivery.CIWatch {
+				task, err = o.move(task, state.CIWatching,
+					map[string]any{"pr_number": task.PRNumber, "reason": "等待 CI 结果"}, nil)
+			} else {
+				task, err = o.move(task, state.Done,
+					map[string]any{
+						"reason": "PR 已创建", "ci": "skipped",
+						"summary": "CI 监听未开启；不会将未查询状态标记为通过",
+					}, map[string]any{"finished_at": now()})
+			}
+		case state.CIWatching:
+			task, err = o.ciStep(task, repo)
 		default:
 			return task, fmt.Errorf("状态 %s 没有对应的推进步骤", task.Status)
 		}
@@ -199,11 +262,14 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 		if o.cfg.Triage.UseModel && o.model != nil && result.Level < triage.L {
 			est, eerr := (&triage.ModelEstimator{
 				Client: o.model, Model: o.modelName, MaxTokens: o.maxTokens,
-			}).Estimate(context.Background(), task.Requirement, repo)
+			}).Estimate(context.Background(), task.Requirement, repo, task.Source)
 			if eerr != nil {
+				if uerr := o.recordUsage(task.ID, "triage", o.modelName, est.Usage); uerr != nil {
+					return task, uerr
+				}
 				// 分级失败不应阻断任务：记录后按规则结果继续。
 				if aerr := o.store.AppendEvent(task.ID, "triage_model_failed",
-					map[string]any{"error": eerr.Error()}); aerr != nil {
+					map[string]any{"error": delivery.RedactText(eerr.Error())}); aerr != nil {
 					return task, aerr
 				}
 			} else {
@@ -246,6 +312,7 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.Task, error) {
 	req := planning.Requirement{
 		TaskID:      task.ID,
+		Source:      task.Source,
 		Text:        task.Requirement,
 		VerifyNames: verifyNames(repo),
 		Commands:    commandMap(repo),
@@ -269,7 +336,7 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 	plan, err := planWith(planner, req)
 	if err != nil {
 		if aerr := o.store.AppendEvent(task.ID, "plan_failed", map[string]any{
-			"error":  err.Error(),
+			"error":  delivery.RedactText(err.Error()),
 			"reason": "模型规划失败，降级为静态计划",
 		}); aerr != nil {
 			return task, aerr
@@ -362,6 +429,7 @@ func (o *Orchestrator) codeStep(task store.Task, repo config.RepoConfig) (store.
 
 	res, err := o.backend.RunStep(backend.StepContext{
 		TaskID:         task.ID,
+		Source:         task.Source,
 		Requirement:    task.Requirement,
 		Plan:           plan.PromptText(),
 		Worktree:       info.Path,
@@ -371,6 +439,17 @@ func (o *Orchestrator) codeStep(task store.Task, repo config.RepoConfig) (store.
 		OnUsage:        o.usageHook(task.ID, "coder"),
 	})
 	if err != nil {
+		if need, ok := backend.AsInfoNeeded(err); ok {
+			// 模型主动请求澄清：这是正常暂停，不是失败。问题写入 interactions，
+			// 用户的回复会并入需求文本，下一轮规划能看到完整上下文。
+			if rerr := o.store.RecordInteraction(task.ID, "question", strings.Join(need.Questions, "\n")); rerr != nil {
+				return task, rerr
+			}
+			return o.move(task, state.NeedsInfo, map[string]any{
+				"questions": need.Questions,
+				"reason":    "编码步骤请求补充信息",
+			}, nil)
+		}
 		switch {
 		case errors.Is(err, cost.ErrBudgetExceeded):
 			return o.suspend(task, "预算上限已用尽，已停止调用模型")
@@ -442,7 +521,11 @@ func (o *Orchestrator) verifyStep(task store.Task, repo config.RepoConfig) (stor
 			return task, err
 		}
 		if rep.Passed {
-			return o.move(task, state.Committing, map[string]any{
+			next := state.Committing
+			if o.reviewEnabled() {
+				next = state.Reviewing
+			}
+			return o.move(task, next, map[string]any{
 				"changed_files": len(changes),
 				"acceptance":    len(rep.Acceptance),
 			}, nil)
@@ -468,6 +551,134 @@ func (o *Orchestrator) verifyStep(task store.Task, repo config.RepoConfig) (stor
 		return task, err
 	}
 	return task, nil
+}
+
+// reviewEnabled 报告是否启用独立审查。没有模型时无从审查，直接跳过。
+func (o *Orchestrator) reviewEnabled() bool {
+	return o.cfg.Review.Enabled && (o.reviewer != nil || o.model != nil)
+}
+
+// reviewStep 让独立 Reviewer 审查最终 diff。
+//
+// 审查本身失败（网络、格式、校验）不等于代码有问题，因此挂起等人工判断，
+// 而不是当作“不通过”回炉改代码——那会把一次接口故障变成无谓的改动。
+func (o *Orchestrator) reviewStep(task store.Task, repo config.RepoConfig) (store.Task, error) {
+	info := workspace.Info{Path: task.WorktreePath, Branch: task.Branch, BaseSHA: task.BaseSHA}
+	if info.Path == "" {
+		return o.suspend(task, "任务缺少工作区信息，无法审查")
+	}
+	diff, err := o.ws.Diff(info)
+	if err != nil {
+		return task, err
+	}
+	plan, _ := planning.Parse(task.PlanJSON)
+
+	reviewer := o.reviewer
+	if reviewer == nil {
+		reviewer = &review.ModelReviewer{
+			Client: o.model, Model: o.modelName, MaxTokens: o.maxTokens,
+			OnUsage: func(role string, u llm.Usage) {
+				_ = o.recordUsage(task.ID, role, o.modelName, u)
+			},
+		}
+	}
+	verdict, err := reviewer.Review(context.Background(), review.Input{
+		Source:      task.Source,
+		Requirement: task.Requirement,
+		Plan:        plan.PromptText(),
+		Diff:        diff,
+		Acceptance:  acceptanceSummary(o.store, task.ID),
+	})
+	if err == nil {
+		// 即便替换成自定义 Reviewer，也必须经过同一套程序侧校验；
+		// 不允许 approve 掩盖阻塞意见，或引用 diff 之外的路径。
+		err = review.ValidateAgainstDiff(verdict, diff)
+	}
+	if err != nil {
+		if aerr := o.store.AppendEvent(task.ID, "review_failed",
+			map[string]any{"error": truncateRunes(delivery.RedactText(err.Error()), 2000)}); aerr != nil {
+			return task, aerr
+		}
+		return o.suspend(task, "独立审查失败，需人工确认: "+delivery.RedactText(err.Error()))
+	}
+	if err := o.checkBudget(task.ID); err != nil {
+		return o.suspend(task, "审查后预算已用尽")
+	}
+	verdict.Summary = delivery.RedactText(verdict.Summary)
+	for i := range verdict.Findings {
+		verdict.Findings[i].Comment = delivery.RedactText(verdict.Findings[i].Comment)
+	}
+	if err := o.store.AppendEvent(task.ID, "review_result", map[string]any{
+		"decision": string(verdict.Decision), "summary": verdict.Summary,
+		"findings": reviewFindings(verdict),
+	}); err != nil {
+		return task, err
+	}
+
+	if verdict.Approved() {
+		return o.move(task, state.Committing, map[string]any{
+			"review":   "approve",
+			"summary":  verdict.Summary,
+			"findings": len(verdict.Findings),
+		}, nil)
+	}
+
+	attempts := task.ReviewAttempts + 1
+	if attempts > o.cfg.Policy.MaxReviewAttempts {
+		return o.move(task, state.NeedsHuman, map[string]any{
+			"reason":          fmt.Sprintf("审查未通过且已达上限（%d 次）", o.cfg.Policy.MaxReviewAttempts),
+			"last_failure":    truncateRunes(verdict.Format(), 2000),
+			"review_findings": reviewFindings(verdict),
+		}, nil)
+	}
+	if aerr := o.store.AppendEvent(task.ID, "fix_requested", map[string]any{
+		"attempt": attempts,
+		"source":  "reviewer",
+		"failure": truncateRunes(verdict.Format(), 2000),
+	}); aerr != nil {
+		return task, aerr
+	}
+	return o.move(task, state.Coding, map[string]any{
+		"review":   "request_changes",
+		"attempt":  attempts,
+		"summary":  verdict.Summary,
+		"findings": reviewFindings(verdict),
+	}, map[string]any{"review_attempts": attempts})
+}
+
+// acceptanceSummary 把最近一次验收结果整理成审查者能直接引用的证据。
+func acceptanceSummary(repo store.Repository, taskID string) string {
+	runs, err := repo.ListVerifications(taskID)
+	if err != nil || len(runs) == 0 {
+		return ""
+	}
+	last := runs[len(runs)-1]
+	var b strings.Builder
+	flag := "未通过"
+	if last.Passed {
+		flag = "通过"
+	}
+	fmt.Fprintf(&b, "验证命令：%s\n", flag)
+	acceptance, _ := last.Report["acceptance"].([]any)
+	for _, a := range acceptance {
+		m, _ := a.(map[string]any)
+		mark := "未满足"
+		if p, _ := m["passed"].(bool); p {
+			mark = "满足"
+		}
+		fmt.Fprintf(&b, "- [%v] %v：%s\n", m["id"], m["description"], mark)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func reviewFindings(r review.Review) []any {
+	out := make([]any, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		out = append(out, map[string]any{
+			"path": f.Path, "line": f.Line, "severity": string(f.Severity), "comment": f.Comment,
+		})
+	}
+	return out
 }
 
 // deliverStep 提交改动，并（在开启交付时）扫描密钥、推送分支。
@@ -531,7 +742,10 @@ func (o *Orchestrator) deliverStep(task store.Task, repo config.RepoConfig) (sto
 		map[string]any{"commit_sha": sha, "remote": repo.Remote, "branch": info.Branch}, shaFields)
 }
 
-// prStep 创建草稿 PR。gh 不可用时挂起：分支已推送，人工创建 PR 即可。
+// prStep 幂等地创建或更新草稿 PR。gh 不可用时挂起：分支已推送，人工创建 PR 即可。
+//
+// 必须幂等：CI 失败会回到 CODING 再走一遍交付流程，直接 create 会撞上
+// “a pull request already exists”，把一次可修复的 CI 失败变成人工介入。
 func (o *Orchestrator) prStep(task store.Task, repo config.RepoConfig) (store.Task, error) {
 	host := o.codeHost
 	if host == nil {
@@ -543,7 +757,7 @@ func (o *Orchestrator) prStep(task store.Task, repo config.RepoConfig) (store.Ta
 		}
 		host = delivery.GHCli{}
 	}
-	pr, err := host.CreatePR(context.Background(), delivery.PRRequest{
+	pr, err := host.EnsurePR(context.Background(), delivery.PRRequest{
 		Worktree: task.WorktreePath,
 		Base:     repo.DefaultBranch,
 		Head:     task.Branch,
@@ -554,13 +768,108 @@ func (o *Orchestrator) prStep(task store.Task, repo config.RepoConfig) (store.Ta
 	if err != nil {
 		return o.move(task, state.NeedsHuman, map[string]any{"reason": err.Error()}, nil)
 	}
-	task, err = o.move(task, state.PROpened,
-		map[string]any{"pr_url": pr.URL, "pr_number": pr.Number, "draft": o.cfg.Delivery.DraftPR},
-		map[string]any{"pr_url": pr.URL, "pr_number": pr.Number})
-	if err != nil {
-		return task, err
+	action := "updated"
+	if pr.Created {
+		action = "created"
 	}
-	return o.move(task, state.Done, map[string]any{"pr_url": pr.URL}, map[string]any{"finished_at": now()})
+	return o.move(task, state.PROpened,
+		map[string]any{
+			"pr_url": pr.URL, "pr_number": pr.Number, "draft": o.cfg.Delivery.DraftPR,
+			"action": action,
+		},
+		map[string]any{"pr_url": pr.URL, "pr_number": pr.Number})
+}
+
+// ciStep 轮询 PR 的 CI 结果（SDD 5.7）。
+//
+// 通过 → DONE；失败 → 回传日志并回到 CODING（受 max_ci_attempts 限制）；
+// 没有 CI → DONE 并明确记录“未运行 CI”；等待超时 → 挂起等人工。
+func (o *Orchestrator) ciStep(task store.Task, repo config.RepoConfig) (store.Task, error) {
+	finish := func(payload map[string]any) (store.Task, error) {
+		return o.move(task, state.Done, payload, map[string]any{"finished_at": now()})
+	}
+	if !o.cfg.Delivery.CIWatch {
+		return finish(map[string]any{"ci": "skipped", "reason": "未开启 CI 监听"})
+	}
+	if task.PRNumber <= 0 {
+		return o.suspend(task, "PR 编号缺失，无法监听 CI")
+	}
+
+	watcher := o.ciWatcher
+	if watcher == nil {
+		if !delivery.Available() {
+			return o.suspend(task, "gh CLI 不可用，无法查询 CI 状态")
+		}
+		watcher = delivery.GHCli{}
+	}
+	req := delivery.CIRequest{
+		Worktree: task.WorktreePath,
+		PRNumber: task.PRNumber,
+		Head:     task.Branch,
+	}
+	deadline := time.Now().Add(o.ciTimeout)
+
+	for {
+		snap, err := watcher.Checks(context.Background(), req)
+		if err != nil {
+			return o.suspend(task, "查询 CI 状态失败: "+delivery.RedactText(err.Error()))
+		}
+		switch snap.State {
+		case delivery.CINone:
+			return finish(map[string]any{
+				"ci": "none", "summary": snap.Summary,
+				"note": "PR 上未配置 CI 检查，按无 CI 处理",
+			})
+		case delivery.CIPassed:
+			return finish(map[string]any{"ci": "passed", "summary": snap.Summary})
+		case delivery.CIFailed:
+			snap.Summary = delivery.RedactText(snap.Summary)
+			snap.Logs = delivery.RedactText(snap.Logs)
+			if aerr := o.store.AppendEvent(task.ID, "ci_failed", map[string]any{
+				"summary": snap.Summary, "checks": snap.Checks,
+			}); aerr != nil {
+				return task, aerr
+			}
+			attempts := task.CIAttempts + 1
+			if attempts > o.cfg.Delivery.MaxCIAttempts {
+				return o.move(task, state.NeedsHuman, map[string]any{
+					"reason":  fmt.Sprintf("CI 失败且已达上限（%d 次）", o.cfg.Delivery.MaxCIAttempts),
+					"summary": snap.Summary,
+				}, nil)
+			}
+			failure := "CI 失败：" + snap.Summary
+			if snap.Logs != "" {
+				failure += "\n\n" + snap.Logs
+			}
+			if aerr := o.store.AppendEvent(task.ID, "fix_requested", map[string]any{
+				"attempt": attempts,
+				"source":  "ci",
+				"failure": truncateRunes(failure, 2000),
+			}); aerr != nil {
+				return task, aerr
+			}
+			return o.move(task, state.Coding, map[string]any{
+				"ci": "failed", "attempt": attempts, "summary": snap.Summary,
+			}, map[string]any{"ci_attempts": attempts})
+		case delivery.CIPending:
+			if !time.Now().Before(deadline) {
+				return o.move(task, state.NeedsHuman, map[string]any{
+					"reason":  fmt.Sprintf("CI 超过 %s 仍未完成", o.ciTimeout),
+					"summary": snap.Summary,
+				}, nil)
+			}
+			wait := o.ciPoll
+			remaining := time.Until(deadline)
+			if wait > remaining {
+				wait = remaining
+			}
+			if serr := o.sleep(context.Background(), wait); serr != nil {
+				return task, serr
+			}
+		default:
+			return o.suspend(task, "未知的 CI 状态: "+string(snap.State))
+		}
+	}
 }
 
 // ---- 计费与预算 ----
@@ -781,6 +1090,9 @@ func prTitle(task store.Task) string {
 func prBody(repo store.Repository, task store.Task) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "由 agentdev 自动生成的任务 **%s**。\n\n", task.ID)
+	if task.Source == "issue" && task.SourceRef != "" {
+		fmt.Fprintf(&b, "来源：GitHub Issue `%s`\n\n", task.SourceRef)
+	}
 	b.WriteString("## 需求\n\n")
 	fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(task.Requirement, "\n", "\n> "))
 	if plan, err := planning.Parse(task.PlanJSON); err == nil && plan.Summary != "" {

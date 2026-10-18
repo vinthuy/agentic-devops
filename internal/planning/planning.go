@@ -214,6 +214,7 @@ func validateRelPath(p string) error {
 // Requirement 是规划器的输入。
 type Requirement struct {
 	TaskID      string
+	Source      string
 	Text        string
 	VerifyNames []string
 	Commands    map[string]string
@@ -241,7 +242,8 @@ var plannerPrompt string
 
 func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "<task_requirement source=\"user\">\n%s\n</task_requirement>\n\n", req.Text)
+	source, trusted := requirementTag(req.Source)
+	fmt.Fprintf(&b, "<task_requirement source=\"%s\" trusted=\"%t\">\n%s\n</task_requirement>\n\n", source, trusted, req.Text)
 	b.WriteString("<repo_context trusted=\"true\">\n")
 	fmt.Fprintf(&b, "可用的验证命令名: %s\n", strings.Join(req.VerifyNames, ", "))
 	for name, cmd := range req.Commands {
@@ -259,11 +261,11 @@ func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) 
 		Messages:  []any{map[string]any{"role": "user", "content": b.String()}},
 		Tools:     []map[string]any{submitPlanTool()},
 	}, "submit_plan")
+	if p.OnUsage != nil && !resp.Usage.Empty() {
+		p.OnUsage("planner", resp.Usage)
+	}
 	if err != nil {
 		return Plan{}, err
-	}
-	if p.OnUsage != nil {
-		p.OnUsage("planner", resp.Usage)
 	}
 
 	data, err := json.Marshal(input)
@@ -278,6 +280,13 @@ func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) 
 		return Plan{}, fmt.Errorf("计划校验失败: %w", err)
 	}
 	return plan, nil
+}
+
+func requirementTag(source string) (string, bool) {
+	if source == "issue" {
+		return "issue", false
+	}
+	return "user", true
 }
 
 func nameSet(names []string) map[string]bool {

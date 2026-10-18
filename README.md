@@ -10,15 +10,16 @@
 
 Go 1.25+。已从 Python 原型迁移（见 SDD ADR-11）；Python 原型已删除，历史见 git 提交 `05f080c` 及之前。
 
-## 当前状态（M1）
+## 当前状态（M2 部分实现）
 
 已实现：状态机、SQLite 持久化（乐观锁）、策略引擎、工具运行时、git worktree 工作区、
 验证命令执行、防作弊检查、Anthropic 协议后端（可指向 DeepSeek 等兼容端点）、
 **结构化计划与机器可校验的验收标准**、**规则+模型分级**、**M 级审批**、**成本核算与预算熔断**、
 **密钥扫描 + 推送 + 草稿 PR**、**中断恢复**、运行报告、CLI。
 
-未实现（属 M2）：`REVIEWING` / `CI_WATCHING`（CI 监听与红 CI 自动修复）、Docker 沙箱、
-多租户与并发调度。
+M2 已实现：独立 Reviewer、`REVIEWING` 状态、可选 `CI_WATCHING` 与红 CI 自动修复、
+GitHub Issue 导入、成本看板、编码时 `request_info` 澄清闭环。Docker 沙箱仍未实现；
+当前环境没有可用 Docker daemon，因此无法在此验证容器执行。多租户与并发调度不在 M2 范围。
 
 ## 构建与测试
 
@@ -42,9 +43,11 @@ export DEEPSEEK_API_KEY=sk-...                # Key 只从环境变量读取，�
 agentdev doctor
 agentdev config validate
 agentdev task create --repo acme/web-app --text "修复登录页邮箱含 + 号时校验失败"
+agentdev task create --repo acme/web-app --issue 123  # 需 gh 登录；从 GitHub 导入 Issue 正文
 agentdev run                                  # 默认 --backend anthropic（协议），指向 DeepSeek
 agentdev task status <task-id>
 agentdev cost <task-id>                       # 花费明细
+agentdev cost report                          # 全局成本看板
 ```
 
 `--home` 是全局参数，可以放在任何子命令之后。
@@ -58,6 +61,9 @@ agentdev cost <task-id>                       # 花费明细
 - `--level` 缺省时自动分级：命中敏感区域/大范围改动的需求会升级为 M 或 L。
   L 级直接拒绝，M 级停在 `AWAITING_APPROVAL`。
 - 需求信息不足时停在 `NEEDS_INFO` 并列出澄清问题。
+- GitHub Issue 正文按不可信输入包裹；自动导入只读取 Issue，不会自动关闭或评论 Issue。
+- 验证通过后 Reviewer 只因需求、正确性、安全或测试完整性问题打回，不因风格偏好阻塞。
+- CI 监听通过 `delivery.ci_watch: true` 显式开启；默认关闭。默认间隔 60 秒、超时 30 分钟、失败最多自动修复 2 次。
 - 需要人工介入的命令（退出码 3 表示需要人工处理）：
 
 ```bash

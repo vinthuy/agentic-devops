@@ -78,6 +78,7 @@ func render(
 	line("")
 	line("- 生成时间: %s", generatedAt)
 	line("- 仓库: %s", task.Repo)
+	line("- 来源: %s", reportSource(task))
 	line("- 分级: %s", orDash(task.Level))
 	line("- 分级来源: %s", triageSource(events, costs))
 	line("- 计划来源: %s", planSource(events, costs))
@@ -104,6 +105,64 @@ func render(
 				continue
 			}
 			line("- `%s` %s：%s —— %s", d.TS, d.Type, d.Label, d.Detail)
+		}
+		line("")
+	}
+
+	var excluded []string
+	for _, e := range events {
+		if e.Type == "commit_artifacts_excluded" {
+			excluded = append(excluded, payloadStrings(e.Payload, "paths")...)
+		}
+	}
+	if len(excluded) > 0 {
+		line("## 提交审计")
+		line("")
+		line("以下工具生成的文件保留在工作区但未进入提交：")
+		for _, p := range excluded {
+			line("- `%s`", p)
+		}
+		line("")
+	}
+
+	var reviewEvents []store.Event
+	for _, e := range events {
+		if e.Type == "review_result" {
+			reviewEvents = append(reviewEvents, e)
+		}
+	}
+	if len(reviewEvents) > 0 {
+		line("## 独立审查")
+		line("")
+		for _, e := range reviewEvents {
+			line("- **%s**：%s", payloadString(e.Payload, "decision"), payloadString(e.Payload, "summary"))
+			for _, finding := range payloadItems(e.Payload, "findings") {
+				m, _ := finding.(map[string]any)
+				where := payloadString(m, "path")
+				if n := payloadFloat(m, "line"); n > 0 {
+					where = fmt.Sprintf("%s:%d", where, int(n))
+				}
+				line("  - [%v] `%s`: %v", m["severity"], where, m["comment"])
+			}
+		}
+		line("")
+	}
+
+	var ciEvents []store.Event
+	for _, e := range events {
+		if e.Type == "ci_failed" || (e.Type == "state_changed" && payloadString(e.Payload, "ci") != "") {
+			ciEvents = append(ciEvents, e)
+		}
+	}
+	if len(ciEvents) > 0 {
+		line("## CI 结果")
+		line("")
+		for _, e := range ciEvents {
+			if e.Type == "ci_failed" {
+				line("- CI 失败：%s", payloadString(e.Payload, "summary"))
+				continue
+			}
+			line("- `%s`：%s", payloadString(e.Payload, "ci"), payloadString(e.Payload, "summary"))
 		}
 		line("")
 	}
@@ -195,4 +254,14 @@ func render(
 	}
 	line("")
 	return b.String()
+}
+
+func reportSource(task store.Task) string {
+	if task.Source == "issue" && task.SourceRef != "" {
+		return "GitHub Issue " + task.SourceRef
+	}
+	if task.Source == "" || task.Source == "cli" {
+		return "CLI"
+	}
+	return task.Source
 }

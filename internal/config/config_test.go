@@ -29,11 +29,45 @@ func TestLoadDefaultsWhenFilesMissing(t *testing.T) {
 	if cfg.Policy.MaxFixAttempts != 3 {
 		t.Errorf("max_fix_attempts 默认值异常: %d", cfg.Policy.MaxFixAttempts)
 	}
+	if cfg.Policy.MaxReviewAttempts != 2 || cfg.Delivery.MaxCIAttempts != 2 || cfg.Delivery.CITimeoutMinutes != 30 || cfg.Delivery.CIPollSeconds != 60 {
+		t.Errorf("M2 默认值异常: policy=%+v delivery=%+v", cfg.Policy, cfg.Delivery)
+	}
+	if !cfg.Review.Enabled || cfg.Delivery.CIWatch {
+		t.Errorf("Reviewer 默认应开启、CI watch 默认应关闭: review=%+v delivery=%+v", cfg.Review, cfg.Delivery)
+	}
 	if cfg.Models.APIKeyEnv != "DEEPSEEK_API_KEY" || !strings.Contains(cfg.Models.BaseURL, "deepseek") {
 		t.Errorf("模型默认配置应为 DeepSeek: %+v", cfg.Models)
 	}
 	if cfg.DBPath() != filepath.Join(home, "agentdev.db") {
 		t.Errorf("数据库路径异常: %s", cfg.DBPath())
+	}
+}
+
+func TestLoadM2SettingsAndValidateCIWatch(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, "config.yaml", `delivery:
+  ci_watch: true
+  max_ci_attempts: 4
+  ci_timeout_minutes: 12
+  ci_poll_seconds: 3
+review:
+  enabled: false
+`)
+	writeFile(t, home, "policy.yaml", "max_review_attempts: 5\n")
+	cfg, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Delivery.CIWatch || cfg.Delivery.MaxCIAttempts != 4 || cfg.Delivery.CITimeoutMinutes != 12 || cfg.Delivery.CIPollSeconds != 3 {
+		t.Errorf("M2 delivery 覆盖未生效: %+v", cfg.Delivery)
+	}
+	if cfg.Review.Enabled || cfg.Policy.MaxReviewAttempts != 5 {
+		t.Errorf("M2 review/policy 覆盖未生效: review=%+v policy=%+v", cfg.Review, cfg.Policy)
+	}
+
+	cfg.Delivery.CIPollSeconds = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ci_poll_seconds") {
+		t.Errorf("ci_watch=true 时 poll 不能为 0，实际: %v", err)
 	}
 }
 

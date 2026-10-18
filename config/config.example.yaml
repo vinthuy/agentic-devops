@@ -6,6 +6,14 @@ delivery:
   enabled: false          # 先本地跑通再开启
   branch_prefix: "agent/"
   draft_pr: true          # 强烈建议保持 true
+  ci_watch: false         # M2：创建 PR 后轮询检查；无 CI 时记录后完成
+  max_ci_attempts: 2      # CI 失败后最多自动修复次数
+  ci_timeout_minutes: 30
+  ci_poll_seconds: 60
+
+# 独立 Reviewer：验证通过后检查需求满足、正确性与安全；不因风格偏好打回。
+review:
+  enabled: true
 
 # 分级：规则始终生效；use_model 时额外做一次模型估算，取更保守的结果。
 triage:

@@ -26,10 +26,30 @@ func IsBackendError(err error) bool {
 	return errors.As(err, &e)
 }
 
+// InfoNeededError 表示步骤主动请求澄清：任务应进入 NEEDS_INFO 等待用户回复，
+// 而不是当成失败挂起。与 Error 的区别在于它有明确的“需要什么信息”。
+type InfoNeededError struct {
+	Questions []string
+}
+
+func (e *InfoNeededError) Error() string {
+	return "需要补充信息: " + strings.Join(e.Questions, "; ")
+}
+
+// AsInfoNeeded 判断错误是否为澄清请求。
+func AsInfoNeeded(err error) (*InfoNeededError, bool) {
+	var e *InfoNeededError
+	if errors.As(err, &e) {
+		return e, true
+	}
+	return nil, false
+}
+
 type Usage = llm.Usage
 
 type StepContext struct {
 	TaskID         string
+	Source         string
 	Requirement    string
 	Plan           string
 	Worktree       string
@@ -55,8 +75,12 @@ type ExecutionBackend interface {
 
 // UserMessage 按 SDD 9.2 的标签约定构造首条用户消息。
 func UserMessage(ctx StepContext) string {
+	source, trusted := "user", true
+	if ctx.Source == "issue" {
+		source, trusted = "issue", false
+	}
 	parts := []string{
-		fmt.Sprintf("<task_requirement source=\"user\">\n%s\n</task_requirement>", ctx.Requirement),
+		fmt.Sprintf("<task_requirement source=\"%s\" trusted=\"%t\">\n%s\n</task_requirement>", source, trusted, ctx.Requirement),
 		fmt.Sprintf("<plan>\n%s\n</plan>", ctx.Plan),
 	}
 	if ctx.FailureSummary != "" {

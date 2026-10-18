@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,8 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -213,13 +217,14 @@ func taskCmd(opts *options) *cobra.Command {
 
 func taskCreateCmd(opts *options) *cobra.Command {
 	var (
-		repoName string
-		text     string
-		file     string
-		level    string
-		budget   float64
-		title    string
-		issue    string
+		repoName  string
+		text      string
+		file      string
+		level     string
+		budget    float64
+		title     string
+		issue     string
+		issueRepo string
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -235,16 +240,44 @@ func taskCreateCmd(opts *options) *cobra.Command {
 			}
 			textSet := cmd.Flags().Changed("text")
 			fileSet := cmd.Flags().Changed("file")
-			if textSet == fileSet {
-				return fail(ExitUsage, "--text 与 --file 必须二选一")
+			issueSet := cmd.Flags().Changed("issue")
+			if boolCount(textSet, fileSet, issueSet) != 1 {
+				return fail(ExitUsage, "--text、--file、--issue 必须且只能指定一个")
 			}
 			requirement := text
+			issueRef := issue
 			if fileSet {
 				data, err := os.ReadFile(file)
 				if err != nil {
 					return fail(ExitUsage, "读取需求文件失败: %v", err)
 				}
 				requirement = string(data)
+			}
+			if issueSet {
+				number, err := strconv.ParseInt(strings.TrimPrefix(strings.TrimSpace(issue), "#"), 10, 64)
+				if err != nil || number < 1 {
+					return fail(ExitUsage, "--issue 必须是正整数 Issue 编号")
+				}
+				ghRepo := strings.TrimSpace(issueRepo)
+				if ghRepo == "" {
+					ghRepo, err = githubRepoSlug(repoCfg, repoName)
+					if err != nil {
+						return fail(ExitUsage, "无法确定 GitHub 仓库，请通过 --issue-repo owner/name 指定：%v", err)
+					}
+				}
+				issueData, err := fetchGitHubIssue(cmd.Context(), ghRepo, number)
+				if err != nil {
+					return fail(ExitError, "读取 Issue 失败: %v", err)
+				}
+				title = issueData.Title
+				requirement = issueData.Title
+				if body := strings.TrimSpace(issueData.Body); body != "" {
+					requirement += "\n\n" + body
+				}
+				issueRef = issueData.URL
+				if issueRef == "" {
+					issueRef = fmt.Sprintf("%s#%d", ghRepo, number)
+				}
 			}
 			requirement = strings.TrimSpace(requirement)
 			if requirement == "" {
@@ -275,7 +308,7 @@ func taskCreateCmd(opts *options) *cobra.Command {
 				LevelOverride: levelOverride,
 				Title:         title,
 				Source:        sourceOf(issue),
-				SourceRef:     issue,
+				SourceRef:     issueRef,
 			})
 			if err != nil {
 				return err
@@ -296,7 +329,8 @@ func taskCreateCmd(opts *options) *cobra.Command {
 	f.StringVar(&level, "level", "", "S / M / L，留空则由分级决定")
 	f.Float64Var(&budget, "budget", 0, "预算上限（美元），默认取仓库配置")
 	f.StringVar(&title, "title", "", "任务标题，用于分支名")
-	f.StringVar(&issue, "issue", "", "关联的 Issue 编号")
+	f.StringVar(&issue, "issue", "", "从 GitHub 导入 Issue 编号（与 --text/--file 互斥）")
+	f.StringVar(&issueRepo, "issue-repo", "", "Issue 所属 GitHub 仓库 owner/name（默认从 git remote 推断）")
 	_ = cmd.MarkFlagRequired("repo")
 	return cmd
 }
@@ -306,6 +340,97 @@ func sourceOf(issue string) string {
 		return "issue"
 	}
 	return "cli"
+}
+
+func boolCount(values ...bool) int {
+	n := 0
+	for _, value := range values {
+		if value {
+			n++
+		}
+	}
+	return n
+}
+
+type githubIssue struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+	URL   string `json:"url"`
+}
+
+func fetchGitHubIssue(parent context.Context, repo string, number int64) (githubIssue, error) {
+	if !validRepoSlug(repo) {
+		return githubIssue{}, fmt.Errorf("仓库名必须是 owner/name，实际 %q", repo)
+	}
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "issue", "view", strconv.FormatInt(number, 10),
+		"--repo", repo, "--json", "title,body,url")
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return githubIssue{}, fmt.Errorf("gh issue view 失败: %s", strings.TrimSpace(stderr.String()))
+	}
+	var issue githubIssue
+	if err := json.Unmarshal([]byte(stdout.String()), &issue); err != nil {
+		return githubIssue{}, fmt.Errorf("解析 Issue 数据失败: %w", err)
+	}
+	if strings.TrimSpace(issue.Title) == "" {
+		return githubIssue{}, errors.New("Issue 缺少标题")
+	}
+	return issue, nil
+}
+
+func validRepoSlug(repo string) bool {
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, "-") {
+			return false
+		}
+		for _, r := range part {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+				(r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func githubRepoSlug(repo config.RepoConfig, configuredName string) (string, error) {
+	cmd := exec.Command("git", "-C", repo.LocalPath, "remote", "get-url", repo.Remote)
+	if out, err := cmd.Output(); err == nil {
+		if slug, ok := parseGitHubSlug(strings.TrimSpace(string(out))); ok {
+			return slug, nil
+		}
+	}
+	// 配置名本身是 owner/name 时也可直接用作 GitHub slug。
+	if validRepoSlug(configuredName) {
+		return configuredName, nil
+	}
+	return "", fmt.Errorf("remote %q 的 URL 不是 github.com owner/name", repo.Remote)
+}
+
+func parseGitHubSlug(remote string) (string, bool) {
+	var tail string
+	switch {
+	case strings.HasPrefix(remote, "git@github.com:"):
+		tail = strings.TrimPrefix(remote, "git@github.com:")
+	case strings.HasPrefix(remote, "https://github.com/"):
+		tail = strings.TrimPrefix(remote, "https://github.com/")
+	case strings.HasPrefix(remote, "http://github.com/"):
+		tail = strings.TrimPrefix(remote, "http://github.com/")
+	case strings.HasPrefix(remote, "ssh://git@github.com/"):
+		tail = strings.TrimPrefix(remote, "ssh://git@github.com/")
+	default:
+		return "", false
+	}
+	tail = strings.TrimSuffix(strings.Trim(tail, "/"), ".git")
+	return tail, validRepoSlug(tail)
 }
 
 func taskListCmd(opts *options) *cobra.Command {
@@ -390,19 +515,19 @@ func taskStatusCmd(opts *options) *cobra.Command {
 			if task.PRURL != "" {
 				fmt.Fprintf(out, "PR: %s\n", task.PRURL)
 			}
-			fmt.Fprintf(out, "修复次数: %d   花费: $%.4f / 预算 $%.2f\n",
-				task.FixAttempts, task.SpentUSD, task.BudgetUSD)
+			fmt.Fprintf(out, "修复次数: %d   审查次数: %d   CI 修复次数: %d   花费: $%.4f / 预算 $%.2f\n",
+				task.FixAttempts, task.ReviewAttempts, task.CIAttempts, task.SpentUSD, task.BudgetUSD)
 			if len(events) > 15 {
 				events = events[len(events)-15:]
 			}
 			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "\n时间\t事件\t变化")
+			fmt.Fprintln(w, "\n时间\t事件\t变化\t详情")
 			for _, e := range events {
 				change := ""
 				if e.ToStatus != "" {
 					change = fmt.Sprintf("%s → %s", orDash(e.FromStatus), e.ToStatus)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\n", e.TS, e.Type, change)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", e.TS, e.Type, change, report.EventDetail(e))
 			}
 			return w.Flush()
 		},
@@ -552,10 +677,14 @@ func taskResumeCmd(opts *options) *cobra.Command {
 			if !state.CanTransition(task.Status, target) {
 				return fail(ExitUsage, "无法从 %s 恢复到 %s", task.Status, target)
 			}
-			// 人工恢复意味着再给一次机会：重置修复计数，否则到过上限的任务会立刻再次挂起。
+			// 人工恢复意味着再给一次机会：所有有上限的尝试计数都要重置，
+			// 否则因审查/CI 达上限挂起的任务恢复后会立刻再次挂起。
 			updated, err := st.Transition(task.ID, task.Version, target,
-				map[string]any{"resumed_to": string(target), "fix_attempts_reset": true},
-				map[string]any{"fix_attempts": 0})
+				map[string]any{
+					"resumed_to": string(target), "fix_attempts_reset": true,
+					"review_attempts_reset": true, "ci_attempts_reset": true,
+				},
+				map[string]any{"fix_attempts": 0, "review_attempts": 0, "ci_attempts": 0})
 			if err != nil {
 				return err
 			}
@@ -611,42 +740,169 @@ func levelLabel(level string) string {
 }
 
 func costCmd(opts *options) *cobra.Command {
-	return &cobra.Command{
-		Use:   "cost <task-id>",
-		Short: "查看任务的花费明细",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, st, task, err := loadTask(cmd, opts)
-			if err != nil {
-				return err
+	cmd := &cobra.Command{
+		Use:   "cost [task-id]",
+		Short: "查看任务花费明细或成本看板",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fail(ExitUsage, "用法: agentdev cost <task-id> 或 agentdev cost report")
 			}
-			defer st.Close()
-			entries, err := st.ListCosts(task.ID)
-			if err != nil {
-				return err
-			}
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "任务 %s  预算 $%.2f  已用 $%.4f\n\n", task.ID, task.BudgetUSD, task.SpentUSD)
-			if len(entries) == 0 {
-				fmt.Fprintln(out, "无计费记录。")
-			} else {
-				w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-				fmt.Fprintln(w, "时间\t角色\t模型\t输入\t输出\t缓存读\t缓存写\t费用")
-				for _, e := range entries {
-					fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t$%.6f\n",
-						e.TS, e.Role, e.Model, e.InputTokens, e.OutputTokens,
-						e.CacheReadTokens, e.CacheWriteTokens, e.CostUSD)
-				}
-				if err := w.Flush(); err != nil {
-					return err
-				}
-			}
-			if _, ok := cfg.PricingFor(); !ok {
-				fmt.Fprintf(out, "\n[WARN] models.yaml 未配置模型 %s 的单价，费用按 $0 统计。\n", cfg.Models.Model)
-			}
-			return nil
+			return costTaskRun(cmd, opts, args[0])
 		},
 	}
+	cmd.AddCommand(&cobra.Command{Use: "report", Short: "查看所有任务的成本汇总看板", Args: cobra.NoArgs, RunE: costReportRun(opts)})
+	return cmd
+}
+
+func costTaskRun(cmd *cobra.Command, opts *options, taskID string) error {
+	cfg, st, task, err := loadTask(cmd, opts)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	entries, err := st.ListCosts(task.ID)
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "任务 %s  预算 $%.2f  已用 $%.4f\n\n", task.ID, task.BudgetUSD, task.SpentUSD)
+	if len(entries) == 0 {
+		fmt.Fprintln(out, "无计费记录。")
+	} else {
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "时间\t角色\t模型\t输入\t输出\t缓存读\t缓存写\t费用")
+		for _, e := range entries {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t$%.6f\n",
+				e.TS, e.Role, e.Model, e.InputTokens, e.OutputTokens,
+				e.CacheReadTokens, e.CacheWriteTokens, e.CostUSD)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	if _, ok := cfg.PricingFor(); !ok {
+		fmt.Fprintf(out, "\n[WARN] models.yaml 未配置模型 %s 的单价，费用按 $0 统计。\n", cfg.Models.Model)
+	}
+	return nil
+}
+
+type costAggregate struct {
+	Calls, Input, Output int
+	Cost                 float64
+}
+
+func costReportRun(opts *options) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, _ []string) error {
+		cfg, err := loadConfig(opts)
+		if err != nil {
+			return err
+		}
+		st, err := openStore(cfg)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		entries, err := st.ListAllCosts()
+		if err != nil {
+			return err
+		}
+		tasks, err := st.ListTasks("", "")
+		if err != nil {
+			return err
+		}
+		byRole, byModel := map[string]*costAggregate{}, map[string]*costAggregate{}
+		byTask := map[string]float64{}
+		var total float64
+		for _, e := range entries {
+			total += e.CostUSD
+			addCost(byRole, e.Role, e)
+			addCost(byModel, e.Model, e)
+			byTask[e.TaskID] += e.CostUSD
+		}
+		var missingPricing []string
+		for _, task := range tasks {
+			events, err := st.ListEvents(task.ID)
+			if err != nil {
+				return err
+			}
+			for _, event := range events {
+				if event.Type == "cost_pricing_missing" {
+					model, _ := event.Payload["model"].(string)
+					missingPricing = append(missingPricing, fmt.Sprintf("%s (%s)", task.ID, model))
+				}
+			}
+		}
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "成本看板：%d 个任务，%d 次模型调用，累计 $%.6f\n\n", len(tasks), len(entries), total)
+		if len(missingPricing) > 0 {
+			fmt.Fprintf(out, "[WARN] %d 个任务缺少模型单价，$0 计费不代表免费：%s\n\n",
+				len(missingPricing), strings.Join(missingPricing, ", "))
+		}
+		printCostAggregate(out, "按角色", byRole)
+		printCostAggregate(out, "按模型", byModel)
+		if len(byTask) > 0 {
+			fmt.Fprintln(out, "花费最高的任务：")
+			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "任务 ID\t仓库\t状态\t费用")
+			taskByID := make(map[string]store.Task, len(tasks))
+			for _, task := range tasks {
+				taskByID[task.ID] = task
+			}
+			type item struct {
+				id    string
+				spend float64
+			}
+			var ranked []item
+			for id, spend := range byTask {
+				ranked = append(ranked, item{id, spend})
+			}
+			sort.Slice(ranked, func(i, j int) bool { return ranked[i].spend > ranked[j].spend })
+			for i, it := range ranked {
+				if i == 10 {
+					break
+				}
+				t := taskByID[it.id]
+				fmt.Fprintf(w, "%s\t%s\t%s\t$%.6f\n", it.id, t.Repo, t.Status, it.spend)
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+		}
+		if len(entries) == 0 {
+			fmt.Fprintln(out, "\n没有模型调用记录；若使用了模型，请检查是否有 cost_pricing_missing 事件。")
+		}
+		return nil
+	}
+}
+
+func addCost(groups map[string]*costAggregate, key string, e store.CostEntry) {
+	a := groups[key]
+	if a == nil {
+		a = &costAggregate{}
+		groups[key] = a
+	}
+	a.Calls++
+	a.Input += e.InputTokens
+	a.Output += e.OutputTokens
+	a.Cost += e.CostUSD
+}
+
+func printCostAggregate(out io.Writer, title string, groups map[string]*costAggregate) {
+	fmt.Fprintf(out, "%s：\n", title)
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "名称\t调用\t输入\t输出\t费用")
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		a := groups[key]
+		fmt.Fprintf(w, "%s\t%d\t%d\t%d\t$%.6f\n", key, a.Calls, a.Input, a.Output, a.Cost)
+	}
+	_ = w.Flush()
+	fmt.Fprintln(out)
 }
 
 func runCmd(opts *options) *cobra.Command {
