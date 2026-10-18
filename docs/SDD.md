@@ -904,7 +904,7 @@ agentic-devops/
 | ADR-08 | 默认 Draft PR，不自动合并 | 直接 Ready for Review | 与 PRD 中的信任策略一致，降低误合并风险 |
 | ADR-09 | 验收标准必须映射到可执行检查 | 允许自然语言验收 | 解决“自证通过”问题，是本系统的核心差异点 |
 | ADR-10 | 运行数据与代码仓库分离（`AGENTDEV_HOME`） | 数据存于项目目录 | 避免误提交；便于多项目共享 |
-| ADR-11 | 技术栈由 Python 迁移到 Go | 保留 Python 原型 | 单二进制便于分发与部署；子进程与并发模型更直接。Python 原型保留在 `legacy-python/` 作为行为参考，功能对齐后删除 |
+| ADR-11 | 技术栈由 Python 迁移到 Go | 保留 Python 原型 | 单二进制便于分发与部署；子进程与并发模型更直接。功能对齐后（Go 与 Python 测试均通过）已删除 Python 原型，历史见提交 `05f080c` |
 | ADR-12 | 模型后端采用 Anthropic Messages 协议 + 可配置 `base_url` | 绑定单一厂商 SDK | DeepSeek 等提供兼容端点，切换模型只需改配置与环境变量 |
 
 ---

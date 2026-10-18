@@ -8,7 +8,7 @@
 
 ## 技术栈
 
-Go 1.25+。已从 Python 原型迁移（见 SDD ADR-11）；原型代码保留在 `legacy-python/` 作为行为参考。
+Go 1.25+。已从 Python 原型迁移（见 SDD ADR-11）；Python 原型已删除，历史见 git 提交 `05f080c` 及之前。
 
 ## 当前状态（M0 原型）
 
@@ -69,5 +69,4 @@ internal/
   testutil/         测试用临时 git 仓库
 config/             配置模板
 docs/               PRD、SDD、实施方案
-legacy-python/      Python 原型（只读参考，待删除）
 ```

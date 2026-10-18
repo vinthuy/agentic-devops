@@ -4,7 +4,7 @@
 *.out
 /bin/
 
-# Python（legacy-python 参考实现）
+# Python（历史原型已移除，保留以防误提交）
 __pycache__/
 *.py[cod]
 *.egg-info/
