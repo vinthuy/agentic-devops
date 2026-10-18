@@ -1049,12 +1049,12 @@ stateDiagram-v2
 | AC-20 | FR-034 | Reviewer 结论通过校验；`request_changes` 回编码；超限挂起；审查失败挂起而非回炉 | `TestValidateRejectsInconsistentOrIncompleteVerdicts`、`TestReviewRequestChangesReturnsToCoding`、`TestReviewLimitSuspendsForHuman`、`TestReviewFailureSuspendsInsteadOfRejecting`、`TestOrchestratorValidatesCustomReviewerVerdict` | 已覆盖；审查判断质量仅有一次真实端到端样本 |
 | AC-21 | FR-035 | 修改验证配置、添加跳过标记、删除测试、减少测试数均转人工 | `TestAnticheatFlagsVerifyConfigChange`、`TestAnticheatFlagsAddedSkipMarker`、`TestAnticheatFlagsDeletedTestFile`、`TestAnticheatFlagsReducedTestCount`、`TestTamperingWithVerifyConfigNeedsHuman` | 已覆盖；误报率待基准统计 |
 | AC-22 | FR-040 | 分支名 `agent/<task-id>-<slug>`，推送到远端，拒绝推送默认分支与非预期前缀 | `TestDeliveryPushesBranchAndOpensDraftPR`、`TestPushGuardRejectsProtectedBranches`、`TestCreateWorktreeFromDefaultBranchHead` | 已覆盖 |
-| AC-23 | FR-041 | 同一分支已有 PR 时更新而不重复创建；鉴权失败不被当作“不存在” | `TestGHCliEnsurePRUpdatesExistingInsteadOfCreatingDuplicate`、`TestGHCliEnsurePRCreatesWhenMissing`、`TestGHCliEnsurePRDoesNotTreatAuthFailureAsMissing` | 已覆盖（Runner 替身）；真实 `gh` 待真实环境 |
+| AC-23 | FR-041 | 同一分支已有 PR 时更新而不重复创建；鉴权失败不被当作“不存在” | `TestGHCliEnsurePRUpdatesExistingInsteadOfCreatingDuplicate`、`TestGHCliEnsurePRCreatesWhenMissing`、`TestGHCliEnsurePRDoesNotTreatAuthFailureAsMissing`；真实创建见 PR #1 | 已覆盖：真实创建已验证；更新已有 PR 仅替身覆盖 |
 | AC-24 | FR-042 | PR 正文包含需求、计划来源、验收矩阵、成本、任务 ID、运行报告路径 | `TestCommitMessageAndPRBodyContent` | 已覆盖 |
 | AC-25 | FR-043 | 默认创建 Draft PR | `TestDeliveryPushesBranchAndOpensDraftPR` | 已覆盖 |
 | AC-26 | FR-044 | 来自 Issue 的任务在 PR 正文注明来源 URL | `TestCommitMessageAndPRBodyContent` | 已覆盖 |
 | AC-27 | FR-045 | 推送前密钥扫描；命中则阻止推送并转人工 | `TestSecretScanBlocksPush`、`TestScanDiffFindsAddedSecrets`、`TestScanDiffFlagsSensitiveFileNames` | 已覆盖 |
-| AC-28 | FR-046 | CI 监听：通过完成；无 CI 明确记录；失败回修并受上限约束；超时挂起 | `TestCIPassedMarksDone`、`TestCINoneMarksDoneWithExplicitNote`、`TestCIFailedReturnsToCodingAndCounts`、`TestCIExceedingLimitSuspends`、`TestCIPendingTimesOut`、`TestGHCliChecksParsesFailuresAndFetchesLogs`、`TestGHCliChecksUnknownStateIsNotSuccess` | 已覆盖（FakeCI / Runner）；线上 CI 待真实环境 |
+| AC-28 | FR-046 | CI 监听：通过完成；无 CI 明确记录；失败回修并受上限约束；超时挂起 | `TestCIPassedMarksDone`、`TestCINoneMarksDoneWithExplicitNote`、`TestCIFailedReturnsToCodingAndCounts`、`TestCIExceedingLimitSuspends`、`TestCIPendingTimesOut`、`TestGHCliChecksParsesFailuresAndFetchesLogs`、`TestGHCliChecksUnknownStateIsNotSuccess`；真实无 CI 见 PR #1 | 已覆盖：无 CI 路径已在真实 GitHub 验证；红 CI 回修仍仅 Fake/替身 |
 | AC-29 | FR-047 | 任务完成后回写 Issue 评论 | — | **未实现**（P2，M3） |
 | AC-30 | FR-050 | 每次模型调用记录 token 与费用 | `TestTableComputesCostPerMillionTokens`、`TestUsageAddAndEmpty`、`TestListAllCostsIncludesTaskIDs` | 已覆盖 |
 | AC-31 | FR-051 | 任务前给出成本预估 | — | **未实现**（P2） |
