@@ -487,7 +487,11 @@ func (s *SQLiteStore) Transition(
 	}
 	assignments["status"] = string(to)
 	if state.Suspended[to] {
-		assignments["previous_status"] = current
+		// 默认记住挂起前的状态；允许调用方显式指定恢复目标，
+		// 例如“验收标准不可执行”应恢复到 PLANNING，而不是再次验证同一份计划。
+		if _, explicit := fields["previous_status"]; !explicit {
+			assignments["previous_status"] = current
+		}
 	}
 	assignments["version"] = version + 1
 	assignments["updated_at"] = ts

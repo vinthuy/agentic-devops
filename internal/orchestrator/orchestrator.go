@@ -655,10 +655,11 @@ func (o *Orchestrator) replanForInvalidAcceptance(
 		if e.Type != "plan_replanned" {
 			continue
 		}
+		// 恢复到 PLANNING 才有意义：恢复到 VERIFYING 只会用同一份坏计划再次失败。
 		return o.move(task, state.NeedsHuman, map[string]any{
 			"reason":   "重新规划后验收标准仍不可执行，需人工修正计划",
 			"findings": findings,
-		}, nil)
+		}, map[string]any{"previous_status": string(state.Planning)})
 	}
 	if err := o.store.AppendEvent(task.ID, "plan_replanned", map[string]any{
 		"cause": "acceptance_invalid",
@@ -817,7 +818,26 @@ func (o *Orchestrator) deliverStep(task store.Task, repo config.RepoConfig) (sto
 		}
 	}
 	if sha == "" {
-		return o.move(task, state.NeedsHuman, map[string]any{"reason": "没有可提交的改动"}, nil)
+		// 崩溃恢复只适用于“提交成功但状态没落库”：此时任务还没记录过 commit_sha。
+		// 若任务已有 commit_sha，说明本次确实没有新改动（例如 CI 失败后编码器没改代码），
+		// 不能复用旧提交反复重推，否则会让 CI 重试计数空转。
+		if task.CommitSHA == "" {
+			recovered, ok, herr := o.ws.HeadCommitFor(info, task.ID)
+			if herr != nil {
+				return task, herr
+			}
+			if ok {
+				sha = recovered
+				if aerr := o.store.AppendEvent(task.ID, "commit_recovered", map[string]any{
+					"commit": sha, "note": "提交已存在但状态未落库，已复用该提交",
+				}); aerr != nil {
+					return task, aerr
+				}
+			}
+		}
+		if sha == "" {
+			return o.move(task, state.NeedsHuman, map[string]any{"reason": "没有可提交的改动"}, nil)
+		}
 	}
 	shaFields := map[string]any{"commit_sha": sha}
 

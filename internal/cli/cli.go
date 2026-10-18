@@ -23,6 +23,7 @@ import (
 	"agentdev/internal/cost"
 	"agentdev/internal/llm"
 	"agentdev/internal/orchestrator"
+	"agentdev/internal/planning"
 	"agentdev/internal/report"
 	"agentdev/internal/state"
 	"agentdev/internal/store"
@@ -658,13 +659,13 @@ func requireStatus(task store.Task, allowed ...state.Status) error {
 }
 
 func taskApproveCmd(opts *options) *cobra.Command {
-	var by string
+	var by, planPath string
 	cmd := &cobra.Command{
 		Use:   "approve <task-id>",
-		Short: "审批 M 级任务，允许进入编码",
+		Short: "审批 M 级任务，允许进入编码（可用 --plan 修改计划）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, st, task, err := loadTask(cmd, opts)
+			cfg, st, task, err := loadTask(cmd, opts)
 			if err != nil {
 				return err
 			}
@@ -672,18 +673,94 @@ func taskApproveCmd(opts *options) *cobra.Command {
 			if err := requireStatus(task, state.AwaitingApproval); err != nil {
 				return err
 			}
-			updated, err := st.Transition(task.ID, task.Version, state.Coding,
-				map[string]any{"approved_by": by}, nil)
+
+			payload := map[string]any{"approved_by": by}
+			fields := map[string]any{}
+			if planPath != "" {
+				edited, verr := vettedPlanFile(cfg, task, planPath)
+				if verr != nil {
+					return verr
+				}
+				fields["plan_json"] = edited
+				payload["plan_edited"] = true
+			}
+
+			updated, err := st.Transition(task.ID, task.Version, state.Coding, payload, fields)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "[OK] 已批准 %s，状态: %s\n", task.ID, updated.Status)
-			fmt.Fprintln(cmd.OutOrStdout(), "继续执行: agentdev run --task "+task.ID)
+			out := cmd.OutOrStdout()
+			if planPath != "" {
+				fmt.Fprintf(out, "[OK] 已批准 %s（计划已更新），状态: %s\n", task.ID, updated.Status)
+			} else {
+				fmt.Fprintf(out, "[OK] 已批准 %s，状态: %s\n", task.ID, updated.Status)
+			}
+			fmt.Fprintln(out, "继续执行: agentdev run --task "+task.ID)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&by, "by", "cli", "审批人标识，写入审计事件")
+	cmd.Flags().StringVar(&planPath, "plan", "", "用该 JSON 文件替换计划（可修改验收标准或 allowed_paths）")
 	return cmd
+}
+
+// vettedPlanFile 读取并校验人工修改后的计划。
+//
+// 审批可以修改计划，但不能绕过验证约束：验收标准仍需通过 planning.Validate，
+// 且 scope 只能收紧或保持不变——人工不能借此扩大 Agent 的写入范围。
+func vettedPlanFile(cfg *config.App, task store.Task, path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fail(ExitUsage, "读取计划文件失败: %v", err)
+	}
+	plan, err := planning.Parse(string(data))
+	if err != nil {
+		return "", fail(ExitUsage, "计划文件不是合法 JSON: %v", err)
+	}
+	repoCfg, ok := cfg.Repos[task.Repo]
+	if !ok {
+		return "", fail(ExitUsage, "仓库未配置: %s", task.Repo)
+	}
+	names := map[string]bool{}
+	for _, c := range repoCfg.VerifyCommands {
+		names[c.Name] = true
+	}
+	if err := planning.Validate(plan, names); err != nil {
+		return "", fail(ExitUsage, "计划校验失败: %v", err)
+	}
+	if plan.NeedsInfo() {
+		return "", fail(ExitUsage, "审批用的计划不能是 needs_info，请先回复澄清")
+	}
+
+	if original, perr := planning.Parse(task.PlanJSON); perr == nil && len(original.Scope.AllowedPaths) > 0 {
+		for _, p := range plan.Scope.AllowedPaths {
+			if !scopeCovered(p, original.Scope.AllowedPaths) {
+				return "", fail(ExitUsage,
+					"修改后的写入范围超出原计划（%s）：审批只能收紧范围，不能扩大", p)
+			}
+		}
+	}
+
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// scopeCovered 判断单个 glob 是否被允许路径集合覆盖。
+// 这里只做保守的字符串/前缀判断：宁可拒绝一次，也不放过扩大范围的情况。
+func scopeCovered(glob string, allowed []string) bool {
+	for _, a := range allowed {
+		if a == glob {
+			return true
+		}
+		prefix := strings.TrimSuffix(a, "/**")
+		if prefix != a && (glob == prefix || strings.HasPrefix(glob, prefix+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 func taskReplyCmd(opts *options) *cobra.Command {
@@ -1139,6 +1216,7 @@ func benchCmd(opts *options) *cobra.Command {
 		keep         bool
 		asJSON       bool
 		minRate      float64
+		repeat       int
 	)
 	cmd := &cobra.Command{
 		Use:   "bench",
@@ -1172,7 +1250,9 @@ func benchCmd(opts *options) *cobra.Command {
 			benchOpts := bench.Options{
 				WorkDir: workDir,
 				Keep:    keep,
-				Log:     cmd.OutOrStdout(),
+				Repeat:  repeat,
+				// 进度写 stderr，stdout 留给表格或 --json，避免机器可读输出被污染。
+				Log: cmd.ErrOrStderr(),
 				BackendFor: func(bench.Case) (backend.ExecutionBackend, error) {
 					return makeBackend(cfg, backendName, scriptPath)
 				},
@@ -1205,22 +1285,34 @@ func benchCmd(opts *options) *cobra.Command {
 				return encoder.Encode(map[string]any{"summary": summary, "outcomes": outcomes})
 			}
 			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "用例\t结果\t级别\t花费\t修复\t审查\tCI\t降级")
+			fmt.Fprintln(w, "用例\t轮次\t结果\t级别\t花费\t修复\t审查\tCI\t降级")
 			for _, o := range outcomes {
 				mark := "FAIL"
 				if o.Passed {
 					mark = "PASS"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t$%.4f\t%d\t%d\t%d\t%d\n",
-					o.ID, mark, orDash(o.Level), o.SpentUSD,
+				fmt.Fprintf(w, "%s\t%d\t%s\t%s\t$%.4f\t%d\t%d\t%d\t%d\n",
+					o.ID, o.Run, mark, orDash(o.Level), o.SpentUSD,
 					o.FixAttempts, o.ReviewAttempts, o.CIAttempts, o.Degradations)
 			}
 			if err := w.Flush(); err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "\n成功率 %d/%d = %.0f%%   人工介入 %.0f%%   平均修复 %.2f 轮   平均花费 $%.4f   总花费 $%.4f\n",
-				summary.Passed, summary.Total, summary.SuccessRate*100, summary.HumanRate*100,
-				summary.MeanFixRounds, summary.MeanCostUSD, summary.TotalCostUSD)
+			if stats := bench.ByCase(outcomes); len(stats) > 0 && repeat > 1 {
+				fmt.Fprintln(out, "\n按用例统计：")
+				sw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(sw, "用例\t通过/运行\t通过率")
+				for _, st := range stats {
+					fmt.Fprintf(sw, "%s\t%d/%d\t%.0f%%\n", st.ID, st.Passed, st.Runs,
+						float64(st.Passed)/float64(st.Runs)*100)
+				}
+				if err := sw.Flush(); err != nil {
+					return err
+				}
+			}
+			fmt.Fprintf(out, "\n成功率 %d/%d 次运行 = %.0f%%   用例数 %d   人工介入 %.0f%%   平均修复 %.2f 轮   平均花费 $%.4f   总花费 $%.4f\n",
+				summary.Passed, summary.Trials, summary.SuccessRate*100, summary.Total,
+				summary.HumanRate*100, summary.MeanFixRounds, summary.MeanCostUSD, summary.TotalCostUSD)
 			if minRate > 0 && summary.SuccessRate < minRate {
 				return fail(ExitError, "成功率 %.0f%% 低于门槛 %.0f%%", summary.SuccessRate*100, minRate*100)
 			}
@@ -1236,6 +1328,7 @@ func benchCmd(opts *options) *cobra.Command {
 	f.BoolVar(&keep, "keep", false, "保留临时目录以便排查")
 	f.BoolVar(&asJSON, "json", false, "以 JSON 输出")
 	f.Float64Var(&minRate, "min-rate", 0, "成功率低于该值（0-1）时以退出码 1 结束")
+	f.IntVar(&repeat, "repeat", 1, "每个用例重复运行次数，用于观察波动")
 	return cmd
 }
 

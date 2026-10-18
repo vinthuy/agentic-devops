@@ -56,12 +56,14 @@ func (r Report) InvalidAcceptance() []AcceptanceOutcome {
 	return out
 }
 
-// noTestsPattern 匹配“命令执行成功但没有任何测试被选中”的输出。
-// 这类结果不是代码缺陷，而是选择器/测试名写错。
+// noTestsPattern 匹配“选择器本身无法执行”的输出：没有选中测试、选择器语法不被
+// 运行器接受、或不存在的测试名。这类失败不是代码缺陷，改代码永远修不好。
 var noTestsPattern = regexp.MustCompile(
 	`(?i)(ran 0 tests|no tests ran|no tests to run|no test files|no tests found|` +
 		`no matching tests|no tests matched|matched no packages|no packages to test|` +
-		`warning: no tests)`,
+		`warning: no tests|unittest\.loader\._failedtest|named files must be \.go files|` +
+		`no go files|could not find any test files|cannot find module|no test specified|` +
+		`error: file or directory not found)`,
 )
 
 func looksLikeNoTests(output string) bool {

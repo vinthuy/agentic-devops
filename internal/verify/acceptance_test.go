@@ -50,6 +50,27 @@ func TestRunAllMarksSelectorMatchingNoTestsAsInvalid(t *testing.T) {
 	}
 }
 
+// 运行器直接拒绝选择器语法时，也必须标记为不可执行，而不是普通失败。
+func TestRunAllMarksRunnerRejectedSelectorAsInvalid(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+	}{
+		{"unittest 加载失败", "ERROR: py::test_nope (unittest.loader._FailedTest.py::test_nope)"},
+		{"go 混用文件与包", "named files must be .go files: ./..."},
+		{"node 找不到测试文件", "Could not find any test files matching pattern"},
+	}
+	for _, c := range cases {
+		if !looksLikeNoTests(c.output) {
+			t.Errorf("%s: 应识别为选择器不可执行: %q", c.name, c.output)
+		}
+	}
+	// 真正的代码失败不能被误判成选择器问题。
+	if looksLikeNoTests("FAIL: TestParse (0.00s)\n  parse_test.go:9: want 3, got 2") {
+		t.Error("普通断言失败不应被识别为选择器问题")
+	}
+}
+
 func TestRunAllReusesMatchingCommandResult(t *testing.T) {
 	v, dir := newVerifier(t)
 	commands := config.VerifyCommands{{Name: "base", Command: "echo base"}}

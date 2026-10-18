@@ -79,6 +79,8 @@ func EventDetail(e store.Event) string {
 		return fmt.Sprintf("来源 %s，级别 %s", payloadString(p, "source"), payloadString(p, "level"))
 	case "plan_ready":
 		return "计划来源 " + payloadString(p, "source")
+	case "commit_recovered":
+		return "已复用崩溃前生成的提交 " + truncate(payloadString(p, "commit"), 12)
 	case "review_result":
 		return fmt.Sprintf("%s：%s（%d 条意见）", payloadString(p, "decision"),
 			truncate(payloadString(p, "summary"), 160), len(payloadItems(p, "findings")))

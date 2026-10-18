@@ -886,8 +886,9 @@ agentic-devops/
 | ADR-20 | Reviewer 只因需求、正确性、安全、验证完整性问题阻塞；接口失败则挂起人工 | 风格检查打回；Reviewer 失败时自动回炉 | Reviewer 是独立质量闸门，不是第二个编码模型的偏好投票；可验证 finding 才能驱动代码修改，避免模型故障造成无谓 diff |
 | ADR-21 | PR 交付使用 `EnsurePR`：按 head 查已有 PR，存在则 edit，不存在才 create | 每轮失败修复都创建新 PR | CI 失败回到 CODING 后，必须继续更新同一个 PR；鉴权/网络错误不得误判为 PR 不存在 |
 | ADR-22 | CI 查询只返回当前快照，由状态机按配置轮询；“无 checks”是独立结果，不等同于通过 | 让 `gh pr checks --watch` 阻塞单次命令；把空结果当成功 | 任务状态、超时与恢复仍由持久化状态机掌管；无 CI 必须在事件/报告中明确披露，避免把未执行的验证说成通过 |
-| ADR-23 | 验收标准不可执行时回到规划（自动一次），而非消耗代码修复轮次 | 当成普通验证失败反复改代码；直接悄悄跳过该标准 | 基准集首次运行中，模型凭空编造了不存在的测试选择器（`python -m unittest` 也不支持 pytest 的 `::` 语法），代码明明是正确修复，却烧完 3 次预算报“修复次数已达上限”。不可执行的检查改代码永远满足不了，必须区分“计划缺陷”与“代码缺陷”。自动重规划有界（一次），之后转人工 |
+| ADR-23 | 验收标准不可执行时回到规划（自动一次），而非消耗代码修复轮次 | 当成普通验证失败反复改代码；直接悄悄跳过该标准 | 基准集首次运行中，模型凭空编造了不存在的测试选择器（`python -m unittest` 也不支持 pytest 的 `::` 语法），代码明明是正确修复，却烧完 3 次预算报“修复次数已达上限”。不可执行的检查改代码永远满足不了，必须区分“计划缺陷”与“代码缺陷”。自动重规划有界（一次），之后转人工。识别范围包括“未选中任何测试”和各运行器的拒绝签名（unittest 加载失败、Go 文件名与包模式混用、Node 找不到测试文件等）——只看退出码不够，某些运行器对空选择器返回 0 |
 | ADR-24 | 修复上限耗尽时区分主验证与附加断言：`command`/`test` 通过、仅 `grep`/`file_exists` 失败时，归因为“验收标准可能写错” | 统一报“修复次数已达上限” | 基准集中出现 grep 正则写错一个引号、永远无法匹配，但单元测试全部通过的情况。误导性归因会让人以为是代码质量问题。注意：附加断言仍然阻塞交付，只是失败原因如实说明，不降低验证门槛 |
+| ADR-25 | 审批允许替换计划，但写入范围只能收紧 | 允许审批时任意改计划；或完全不允许修改 | 人工修正验收标准是必要的（模型会写出不可执行的检查），但审批也是权限提升的入口——如果允许扩大 `allowed_paths`，审批就变成了绕过策略的通道。因此 `approve --plan` 必须重新通过 `Validate`，且每个新范围都要被原范围覆盖 |
 
 ---
 
@@ -1029,7 +1030,7 @@ stateDiagram-v2
 | AC-07 | FR-011 | 验收标准只接受 `test` / `command` / `file_exists` / `grep`；不安全选择器被拒绝；匹配不到测试的选择器被标记为不可执行并回到规划 | `TestValidateRejectsBadPlans`、`TestRunAllRejectsUnsafeSelector`、`TestRunAllMarksSelectorMatchingNoTestsAsInvalid`、`TestInvalidAcceptanceReplansWithFeedback`、`TestInvalidAcceptanceAfterReplanSuspends` | 已覆盖 |
 | AC-07b | FR-011 | 主验证通过、仅附加断言（grep/file_exists）失败时，归因为验收标准可能写错，而非代码缺陷 | `TestAuxiliaryOnlyFailureReportsPlanIssue` | 已覆盖 |
 | AC-08 | FR-012 | 需求模糊进入 NEEDS_INFO；reply 返回 PLANNING；只允许从 NEEDS_INFO 回复 | `TestNeedsInfoFlowThenReplyResumes`、`TestReplyOnlyFromNeedsInfo` | 已覆盖 |
-| AC-09 | FR-014 | 审批时可修改验收标准或范围 | — | **未实现**（P1，M2 之后） |
+| AC-09 | FR-014 | 审批时可替换计划（修改验收标准或范围），但范围只能收紧 | `TestApproveWithEditedPlan`、`TestVettedPlanFileScopeRules` | 已覆盖 |
 | AC-10 | FR-020 | worktree 基于默认分支创建，且不包含其他分支内容 | `TestCreateWorktreeFromDefaultBranchHead` | 已覆盖 |
 | AC-11 | FR-021 | 每次工具调用可追溯，且事件不含文件正文 | `TestToolCallsAreAuditedWithoutContent`、`TestVerificationAndViolationRecords` | 已覆盖 |
 | AC-12 | FR-022 | 命令经黑/白名单；违规被拒绝并记录 | `TestRunCommandBlocksDangerous`、`TestForbiddenCommands`、`TestDeniedCommandExplainsAllowedCommands`、`TestPolicyViolationsBlockedThenTaskCompletes` | 已覆盖 |
@@ -1118,9 +1119,9 @@ stateDiagram-v2
 | ~~G-03~~ | ~~PR 正文与提交信息缺少内容断言~~ | AC-14、AC-24、AC-26 | **已关闭**：`TestCommitMessageAndPRBodyContent` 断言需求、来源、计划来源、验收矩阵、成本、报告路径与任务 ID；PR 正文新增运行报告路径与计划来源 | 已关闭 |
 | ~~G-04~~ | ~~worktree 基线未直接断言为默认分支 HEAD~~ | AC-10 | **已关闭**：`TestCreateWorktreeFromDefaultBranchHead` 断言基线 SHA、分支前缀且不含其他分支内容 | 已关闭 |
 | ~~G-05~~ | ~~`task logs` 命令未实现~~ | AC-34 | **已关闭**：`task logs <id> [--limit N] [--json]`，复用 `report.EventDetail`；`TestTaskLogsShowsTimelineAndJSON` | 已关闭 |
-| G-06 | 审批时不能修改计划 | AC-09 | 按 FR-014（P1）设计 `approve --plan-edit` 的校验流程 | 低（P1） |
+| ~~G-06~~ | ~~审批时不能修改计划~~ | AC-09 | **已关闭**：`task approve --plan <file>`；计划须通过 `planning.Validate`，且 `allowed_paths` 只能收紧（`vettedPlanFile`/`scopeCovered`）；`TestApproveWithEditedPlan`、`TestVettedPlanFileScopeRules` | 已关闭 |
 | G-07 | 没有并发任务上限 | AC-38 | 按 FR-064（P1）增加调度器并发控制 | 低（P1） |
-| G-08 | 基准集只有 6 个 S 级用例（目标 20），CI 首次通过率仍未测量 | 21.6 | **部分关闭**：`bench/` + `agentdev bench` 已可复现运行并输出成功率/成本/修复轮数（见 §22）；继续扩样到 20 个，并接入真实 CI | 高（产品验证） |
+| G-08 | 真实 CI 首次通过率仍未测量 | 21.6 | **大部分关闭**：20 个 S 级用例、3 个技术栈已建立并可复现运行；支持 `--repeat` 重复采样（见 §22）。剩余：接入真实仓库 CI 才能测 PRD 的 CI 首次通过率 | 高（产品验证） |
 | G-09 | 线上 Draft PR 与 CI 闭环未在真实远端验证（本次仅完成推送与建仓） | AC-02、AC-23、AC-28、REL-09 | 在授权测试仓库上执行一次完整 PR 与 CI 失败修复闭环，记录结果到 §18 | 高（产品验证） |
 | G-10 | 进程崩溃恢复只有计数与状态测试，没有故障注入 | AC-37、REL 系列 | 添加“中途杀进程后 resume”的脚本化测试 | 中 |
 
@@ -1141,7 +1142,7 @@ stateDiagram-v2
 
 用例通过的定义：最终状态 `DONE`、无运行错误、分级与 `expect_level` 一致。人工介入率统计 `NEEDS_HUMAN` 与运行错误。
 
-### 22.2 当前用例（6）
+### 22.2 当前用例（20）
 
 | 用例 | 语言 | 缺陷类型 | 验证 |
 |---|---|---|---|
@@ -1149,10 +1150,24 @@ stateDiagram-v2
 | `py-slugify` | Python | 连续分隔符未折叠 | `python -m unittest -q` |
 | `py-csv-quote` | Python | 内部引号未转义 | `python -m unittest -q` |
 | `py-json-default` | Python | 原地修改调用方字典 | `python -m unittest -q` |
+| `py-pagination` | Python | 页码从 0 起算导致偏移 | `python -m unittest -q` |
+| `py-duration-format` | Python | 秒数未补零 | `python -m unittest -q` |
+| `py-deep-merge` | Python | 嵌套字典被整体覆盖 | `python -m unittest -q` |
+| `py-extension` | Python | 无扩展名/隐藏文件被误拆 | `python -m unittest -q` |
+| `py-window-sum` | Python | 滑动窗口初始值少一项 | `python -m unittest -q` |
+| `py-binary-search` | Python | 循环条件漏掉最后一次比较 | `python -m unittest -q` |
 | `go-parse-port` | Go | 未 trim 前后空白 | `go test ./...` |
 | `go-dedupe` | Go | 去重后错误排序 | `go test ./...` |
+| `go-list` | Go | 未去空白、未丢弃空项 | `go test ./...` |
+| `go-clamp` | Go | 上下界判断写反 | `go test ./...` |
+| `go-status` | Go | 缺少状态码映射 | `go test ./...` |
+| `go-window` | Go | 滑动窗口初始值少一项 | `go test ./...` |
+| `go-bsearch` | Go | 循环条件漏掉最后一次比较 | `go test ./...` |
+| `js-chunk` | JavaScript | 丢弃尾部部分块 | `node --test` |
+| `js-query` | JavaScript | 无值参数写成 `undefined` | `node --test` |
+| `js-bytes` | JavaScript | 四舍五入丢失一位小数 | `node --test` |
 
-6 个 fixture 在修复前均确认失败（`FAILED (failures=1)` / `--- FAIL`），因此不是“空跑也通过”的假基准。
+20 个 fixture 在修复前均确认失败（Python `FAILED (failures=N)`、Go `--- FAIL`、Node `fail N`），因此不是“空跑也通过”的假基准。覆盖 3 个技术栈、10 类缺陷模式。
 
 ### 22.3 首次测量结果（真实 DeepSeek）
 
@@ -1176,11 +1191,13 @@ stateDiagram-v2
 |---|---|---|
 | 选择器不可执行 | 模型编造 `test_config.py::TestWithDefaults::test_does_not_mutate_defaults`；`python -m unittest` 也不支持 `::`。代码已正确修复，却反复失败 | 检测“未匹配到任何测试”（含退出码为 0 的假通过），标记 `Invalid`，回到 `PLANNING` 并携带反馈；只自动重规划一次（ADR-23） |
 | 附加断言不可满足 | grep 正则少一个引号，永远匹配不到；单元测试全过 | 主验证通过、仅 `grep`/`file_exists` 失败时，如实归因为“验收标准可能写错”（ADR-24）；仍阻塞交付，不降低门槛 |
+| 选择器语法与运行器不匹配 | 20 用例首轮出现两类：`test_extension.py::test_split_ext_no_dot`（pytest 语法用于 unittest，且测试名不存在）；`go test ./... list_test.go`（把文件名拼在包模式后，Go 报 `named files must be .go files`） | 扩充“不可执行”识别签名（`unittest.loader._FailedTest`、`named files must be .go files`、`Could not find any test files` 等）；提示词按运行器给出 selector 语法规则 |
 
 修复后 `py-json-default` 由 `NEEDS_HUMAN` 变为 `DONE`。`py-csv-quote` 的归因已修正，但该用例仍需在扩样时复测（同一 fixture 在不同运行中一次通过、一次失败，说明规划质量存在波动）。
 
 ### 22.5 扩样与局限
 
-- 当前 6 个用例，PRD 目标是 20 个，且应分布在 2–3 个技术栈；扩样前成功率不具备统计意义。
-- 基准只覆盖本地验证与审查，不含真实 GitHub 推送与 CI；`ci_watch` 路径仍由 FakeCI 与 Runner 替身覆盖。
-- 每个用例只跑一次，未做重复采样，因此无法区分模型波动与真实能力差异。
+- 已扩到 20 个用例、3 个技术栈（Python 10 / Go 7 / JS 3），达到 PRD 的样本规模；但仍是每个用例 1 次运行，统计上只是单样本。
+- 需要多轮采样时用 `--repeat N`：结果按运行次数统计，并按用例给出「通过/运行」，可区分模型波动与真实能力差异。
+- 基准只覆盖本地验证与审查，不含真实 GitHub 推送与 CI；`ci_watch` 路径仍由 FakeCI 与 Runner 替身覆盖，CI 首次通过率仍未测量。
+- 用例都是单人小改动，未覆盖跨文件重构、依赖升级、性能与并发缺陷。

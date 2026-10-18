@@ -97,6 +97,55 @@ func TestRunManifestCountsHumanIntervention(t *testing.T) {
 	}
 }
 
+// 重复采样：同一个用例跑多次，Summary 按运行次数统计，ByCase 给出通过/运行。
+func TestRunManifestRepeatsAndAggregatesByCase(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir)
+	manifest := Manifest{Cases: []Case{{
+		ID:          "pass",
+		Fixture:     "fixture",
+		Requirement: "在仓库根目录创建 hello.txt，内容为 hello",
+		Verify:      map[string]string{"check": "go run check.go"},
+		BudgetUSD:   1,
+	}}}
+
+	summary, outcomes, err := RunManifest(context.Background(), dir, manifest, Options{
+		WorkDir:    t.TempDir(),
+		Repeat:     2,
+		BackendFor: fakeWriting("hello\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 2 || outcomes[0].Run != 1 || outcomes[1].Run != 2 {
+		t.Fatalf("应产生两次运行: %+v", outcomes)
+	}
+	if summary.Trials != 2 || summary.Total != 1 || summary.Passed != 2 || summary.SuccessRate != 1 {
+		t.Errorf("汇总应按运行次数统计: %+v", summary)
+	}
+	stats := ByCase(outcomes)
+	if len(stats) != 1 || stats[0].Runs != 2 || stats[0].Passed != 2 {
+		t.Errorf("按用例统计异常: %+v", stats)
+	}
+}
+
+// 提交到仓库的清单必须合法，且每个 fixture 目录都存在，避免文档与代码漂移。
+func TestCommittedManifestIsValid(t *testing.T) {
+	root := filepath.Join("..", "..", "bench")
+	manifest, err := Load(filepath.Join(root, "tasks.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Cases) < 20 {
+		t.Errorf("基准集应至少 20 个用例，实际 %d", len(manifest.Cases))
+	}
+	for _, c := range manifest.Cases {
+		if _, err := os.Stat(filepath.Join(root, c.Fixture)); err != nil {
+			t.Errorf("%s: fixture 不存在: %v", c.ID, err)
+		}
+	}
+}
+
 func TestLoadRejectsInvalidManifests(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tasks.yaml")

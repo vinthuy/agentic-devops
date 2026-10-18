@@ -268,6 +268,11 @@ func TestCIFailedReturnsToCodingAndCounts(t *testing.T) {
 	if len(eventsOfType(t, f.st, task.ID, "ci_failed")) != 1 {
 		t.Fatal("应记录 ci_failed 事件")
 	}
+	// CI 失败后编码器没有产生新改动时，不能把旧提交当成“崩溃恢复”复用，
+	// 否则会重复推送同一提交、重复消耗 CI 重试次数。
+	if len(eventsOfType(t, f.st, task.ID, "commit_recovered")) != 0 {
+		t.Error("CI 失败且无新改动时不应触发提交恢复")
+	}
 	fixes := eventsOfType(t, f.st, task.ID, "fix_requested")
 	if len(fixes) != 1 || fixes[0].Payload["source"] != "ci" {
 		t.Fatalf("应产生来自 CI 的修复请求: %+v", fixes)

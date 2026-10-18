@@ -50,9 +50,11 @@ type Manifest struct {
 	Cases []Case `yaml:"cases"`
 }
 
-// Outcome 是单个用例的运行结果。
+// Outcome 是单个用例单次运行的结果。
 type Outcome struct {
-	ID             string  `json:"id"`
+	ID string `json:"id"`
+	// Run 是第几次重复运行（从 1 开始）；未启用重复采样时恒为 1。
+	Run            int     `json:"run"`
 	Status         string  `json:"status"`
 	Level          string  `json:"level"`
 	ExpectLevel    string  `json:"expect_level,omitempty"`
@@ -67,8 +69,10 @@ type Outcome struct {
 	Err            string  `json:"error,omitempty"`
 }
 
-// Summary 是基准集的聚合指标。
+// Summary 是基准集的聚合指标。启用 --repeat 时，每个用例会贡献多次 trial，
+// 因此 SuccessRate 是“运行次数”维度的比例，可用来观察模型波动。
 type Summary struct {
+	Trials        int     `json:"trials"`
 	Total         int     `json:"total"`
 	Passed        int     `json:"passed"`
 	SuccessRate   float64 `json:"success_rate"`
@@ -95,6 +99,8 @@ type Options struct {
 	Reviewer review.Reviewer
 	// WorkDir 是临时目录根；为空时使用系统临时目录。每个用例在起下面独占一个子目录。
 	WorkDir string
+	// Repeat 是每个用例的重复运行次数（默认 1）。重复采样用于区分模型波动与真实能力。
+	Repeat int
 	// Keep 为 true 时保留临时目录，便于排查失败用例。
 	Keep bool
 	// Log 接收逐用例进度输出，可为 nil。
@@ -161,26 +167,40 @@ func RunManifest(ctx context.Context, manifestDir string, manifest Manifest, opt
 		defer os.RemoveAll(baseDir)
 	}
 
+	repeat := opts.Repeat
+	if repeat <= 0 {
+		repeat = 1
+	}
 	var outcomes []Outcome
-	for _, c := range manifest.Cases {
-		outcome := runCase(ctx, manifestDir, baseDir, c, opts)
-		outcomes = append(outcomes, outcome)
-		if opts.Log != nil {
-			fmt.Fprintf(opts.Log, "[%s] %s 级别=%s 花费=$%.4f 时长=%.1fs\n",
-				outcome.Status, outcome.ID, orDash(outcome.Level), outcome.SpentUSD, outcome.DurationS)
-			if outcome.Err != "" {
-				fmt.Fprintf(opts.Log, "  错误: %s\n", outcome.Err)
+	for run := 1; run <= repeat; run++ {
+		for _, c := range manifest.Cases {
+			outcome := runCase(ctx, manifestDir, baseDir, c, run, opts)
+			outcomes = append(outcomes, outcome)
+			if opts.Log != nil {
+				suffix := ""
+				if repeat > 1 {
+					suffix = fmt.Sprintf(" (run %d/%d)", run, repeat)
+				}
+				fmt.Fprintf(opts.Log, "[%s] %s%s 级别=%s 花费=$%.4f 时长=%.1fs\n",
+					outcome.Status, outcome.ID, suffix, orDash(outcome.Level), outcome.SpentUSD, outcome.DurationS)
+				if outcome.Err != "" {
+					fmt.Fprintf(opts.Log, "  错误: %s\n", outcome.Err)
+				}
 			}
 		}
 	}
-	return summarize(outcomes), outcomes, nil
+	return summarize(outcomes, len(manifest.Cases)), outcomes, nil
 }
 
-func runCase(ctx context.Context, manifestDir, baseDir string, c Case, opts Options) Outcome {
+func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, opts Options) Outcome {
 	started := time.Now()
-	outcome := Outcome{ID: c.ID, ExpectLevel: c.ExpectLevel}
+	outcome := Outcome{ID: c.ID, Run: run, ExpectLevel: c.ExpectLevel}
 
-	work := filepath.Join(baseDir, c.ID)
+	dirName := c.ID
+	if run > 1 {
+		dirName = fmt.Sprintf("%s-run%d", c.ID, run)
+	}
+	work := filepath.Join(baseDir, dirName)
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		outcome.Err = err.Error()
 		outcome.Status = "ERROR"
@@ -285,9 +305,10 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, opts Opti
 	return outcome
 }
 
-func summarize(outcomes []Outcome) Summary {
+func summarize(outcomes []Outcome, caseCount int) Summary {
 	var s Summary
-	s.Total = len(outcomes)
+	s.Total = caseCount
+	s.Trials = len(outcomes)
 	if len(outcomes) == 0 {
 		return s
 	}
@@ -302,11 +323,42 @@ func summarize(outcomes []Outcome) Summary {
 		s.TotalCostUSD += o.SpentUSD
 		fixRounds += o.FixAttempts
 	}
-	s.SuccessRate = float64(s.Passed) / float64(s.Total)
-	s.HumanRate = s.HumanRate / float64(s.Total)
-	s.MeanCostUSD = s.TotalCostUSD / float64(s.Total)
-	s.MeanFixRounds = float64(fixRounds) / float64(s.Total)
+	trials := float64(len(outcomes))
+	s.SuccessRate = float64(s.Passed) / trials
+	s.HumanRate = s.HumanRate / trials
+	s.MeanCostUSD = s.TotalCostUSD / trials
+	s.MeanFixRounds = float64(fixRounds) / trials
 	return s
+}
+
+// CaseStat 按用例聚合多次运行，用于观察波动。
+type CaseStat struct {
+	ID     string `json:"id"`
+	Runs   int    `json:"runs"`
+	Passed int    `json:"passed"`
+}
+
+// ByCase 返回每个用例的通过次数，便于在重复采样下识别不稳定用例。
+func ByCase(outcomes []Outcome) []CaseStat {
+	order := []string{}
+	index := map[string]*CaseStat{}
+	for _, o := range outcomes {
+		stat, ok := index[o.ID]
+		if !ok {
+			index[o.ID] = &CaseStat{ID: o.ID}
+			order = append(order, o.ID)
+			stat = index[o.ID]
+		}
+		stat.Runs++
+		if o.Passed {
+			stat.Passed++
+		}
+	}
+	out := make([]CaseStat, 0, len(order))
+	for _, id := range order {
+		out = append(out, *index[id])
+	}
+	return out
 }
 
 // orderedVerify 保留 YAML 声明顺序。映射在解析后是无序的，因此这里按名称排序，

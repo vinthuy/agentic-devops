@@ -12,8 +12,11 @@
 1. **验收标准必须可机器校验**。每条标准都要给出 `check`：
    - `command`：引用给定的验证命令名（如 `test`、`lint`）。
    - `test`：引用验证命令名，并用 `selector` 指定测试（如 `tests/test_login.py::test_plus`）。
-     **selector 必须来自仓库中真实存在的测试**，且符合该命令支持的语法
-     （例如 `python -m unittest` 不支持 pytest 的 `::` 写法）。
+     **selector 必须来自仓库中真实存在的测试**，且符合该命令支持的语法：
+     - `python -m unittest`：`test_file.py`、`test_file.py` 中的 `模块.类.方法`
+       （点号分隔）；**不支持** pytest 的 `file.py::test_name`。
+     - `go test`：用 `-run TestName`；**不要**把测试文件名直接拼在 `./...` 后面。
+     - `node --test`：只写测试文件路径。
      不确定测试名或语法时，改用 `command`；编造的选择器会匹配不到任何测试，
      导致重新规划甚至转人工。
    - `file_exists`：断言某文件存在。

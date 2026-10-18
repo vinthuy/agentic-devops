@@ -46,9 +46,17 @@ agentdev task create --repo acme/web-app --text "修复登录页邮箱含 + 号�
 agentdev task create --repo acme/web-app --issue 123  # 需 gh 登录；从 GitHub 导入 Issue 正文
 agentdev run                                  # 默认 --backend anthropic（协议），指向 DeepSeek
 agentdev task status <task-id>
+agentdev task logs <task-id> [--limit N] [--json]   # 完整审计时间线
 agentdev cost <task-id>                       # 花费明细
 agentdev cost report                          # 全局成本看板
+agentdev bench --manifest bench/tasks.yaml    # 基准集：成功率/成本/修复轮数
 ```
+
+`task approve` 支持 `--plan <file>`：人工可用修改后的 JSON 计划覆盖原计划，
+但计划必须通过校验，且 `allowed_paths` 只能收紧，不能扩大。
+
+基准集默认每个用例跑一次；加 `--repeat N` 可重复采样并按用例给出通过率，
+用于区分模型波动与真实能力差异。
 
 `--home` 是全局参数，可以放在任何子命令之后。
 

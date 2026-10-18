@@ -85,3 +85,179 @@ cases:
       - "*_test.go"
     budget_usd: 1.0
     expect_level: S
+
+  - id: py-pagination
+    fixture: fixtures/py-pagination
+    requirement: >-
+      修复 paging.py 中的 page：页码从 1 开始，但当前实现按 0 起算，
+      导致第一页返回的是第二页内容、最后一页可能为空。期望 page(items, 1, 3)
+      返回前三项，最后一页允许不足 size 个元素。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: py-duration-format
+    fixture: fixtures/py-duration-format
+    requirement: >-
+      修复 duration.py 中的 format_duration：秒数部分没有补零，65 秒输出
+      "1:5" 而不是 "1:05"。期望 mm:ss 格式，秒始终两位数。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: py-deep-merge
+    fixture: fixtures/py-deep-merge
+    requirement: >-
+      修复 merge.py 中的 deep_merge：嵌套字典被整体覆盖，丢失了 base 里的其他
+      键。期望递归合并嵌套字典，标量仍由 override 覆盖，且不修改任何入参。
+      请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: py-extension
+    fixture: fixtures/py-extension
+    requirement: >-
+      修复 extension.py 中的 split_ext：文件名没有点号时被错误拆成
+      ("READM", "E")，隐藏文件 ".env" 也被当成有扩展名。期望无扩展名时
+      返回原文件名与空字符串。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: py-window-sum
+    fixture: fixtures/py-window-sum
+    requirement: >-
+      修复 window.py 中的 max_window_sum：初始窗口少取了一个元素，导致所有
+      结果偏移。期望初始窗口覆盖前 size 个元素，之后用滑动窗口更新。
+      请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: py-binary-search
+    fixture: fixtures/py-binary-search
+    requirement: >-
+      修复 search.py 中的 search：循环条件写成 low < high，漏掉了
+      low == high 的那一次比较，导致查找最后一个元素失败。期望在升序列表中
+      正确返回下标或 -1。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: go-list
+    fixture: fixtures/go-list
+    requirement: >-
+      修复 list.go 中的 Parse：直接 Split 导致元素带前后空白、空项也保留。
+      期望去掉每项前后空白并丢弃空项，空输入返回空切片。请勿修改测试。
+    verify:
+      test: go test ./...
+    verify_config_files:
+      - "*_test.go"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: go-clamp
+    fixture: fixtures/go-clamp
+    requirement: >-
+      修复 clamp.go 中的 Clamp：上下界判断写反了，小于下界时返回了上界。
+      期望把值限制在 [low, high] 内。请勿修改测试。
+    verify:
+      test: go test ./...
+    verify_config_files:
+      - "*_test.go"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: go-status
+    fixture: fixtures/go-status
+    requirement: >-
+      修复 status.go 中的 Text：缺少 201、204、400 的映射，都落到了 Unknown。
+      期望补齐这三个常见状态码，未知码仍返回 Unknown。请勿修改测试。
+    verify:
+      test: go test ./...
+    verify_config_files:
+      - "*_test.go"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: go-window
+    fixture: fixtures/go-window
+    requirement: >-
+      修复 window.go 中的 MaxSum：初始窗口少累加了一个元素，导致结果偏移。
+      期望初始窗口覆盖前 size 个元素，之后用滑动窗口更新。请勿修改测试。
+    verify:
+      test: go test ./...
+    verify_config_files:
+      - "*_test.go"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: go-bsearch
+    fixture: fixtures/go-bsearch
+    requirement: >-
+      修复 bsearch.go 中的 Search：循环条件写成 low < high，漏掉了最后一次
+      比较，导致查找最后一个元素失败。期望在升序切片中正确返回下标或 -1。
+      请勿修改测试。
+    verify:
+      test: go test ./...
+    verify_config_files:
+      - "*_test.go"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: js-chunk
+    fixture: fixtures/js-chunk
+    requirement: >-
+      修复 chunk.js 中的 chunk：循环条件少算了一个 size，末尾不足一块的元素
+      被丢弃。期望保留尾部部分块，size 非正数时抛错。请勿修改测试。
+    verify:
+      test: node --test
+    verify_config_files:
+      - "*.test.js"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: js-query
+    fixture: fixtures/js-query
+    requirement: >-
+      修复 query.js 中的 parseQuery：没有等号的参数（如 "?flag"）会把字符串
+      "undefined" 写进结果。期望无值参数得到空字符串，并继续解码百分号转义。
+      请勿修改测试。
+    verify:
+      test: node --test
+    verify_config_files:
+      - "*.test.js"
+    budget_usd: 1.0
+    expect_level: S
+
+  - id: js-bytes
+    fixture: fixtures/js-bytes
+    requirement: >-
+      修复 bytes.js 中的 formatBytes：使用 Math.round 导致 1536 显示成
+      "2 KB" 而不是 "1.5 KB"，1024 也丢了小数位。期望 KiB 部分保留一位小数。
+      请勿修改测试。
+    verify:
+      test: node --test
+    verify_config_files:
+      - "*.test.js"
+    budget_usd: 1.0
+    expect_level: S

@@ -161,6 +161,29 @@ func (m *Manager) Commit(info Info, message string) (string, []string, error) {
 	return strings.TrimSpace(sha), excluded, err
 }
 
+// HeadCommitFor 返回 HEAD 提交，并报告它是否属于给定任务。
+//
+// 用于崩溃恢复：提交与状态转换不在同一个事务里，如果在 commit 成功、状态尚未
+// 落库时进程被杀，重试时暂存区已经干净。此时不能把它当成“没有改动”，
+// 而应复用已经产生的提交（提交信息里带 `Task: <id>`）。
+func (m *Manager) HeadCommitFor(info Info, taskID string) (string, bool, error) {
+	out, err := Git(info.Path, "log", "-1", "--format=%H%n%B")
+	if err != nil {
+		return "", false, err
+	}
+	sha, body, _ := strings.Cut(out, "\n")
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return "", false, nil
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "Task: "+taskID {
+			return sha, true, nil
+		}
+	}
+	return sha, false, nil
+}
+
 // Remove 删除 worktree；keepBranch 为 false 时同时删除分支。
 func (m *Manager) Remove(repo config.RepoConfig, info Info, keepBranch bool) error {
 	_, _ = Git(repo.LocalPath, "worktree", "remove", "--force", info.Path)

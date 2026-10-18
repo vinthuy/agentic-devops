@@ -83,6 +83,42 @@ func validPlan() planning.Plan {
 	}
 }
 
+// 因验收标准不可执行挂起后，resume 应回到 PLANNING（而不是再次验证同一份坏计划）。
+func TestInvalidAcceptanceResumeTargetsPlanning(t *testing.T) {
+	f := setup(t)
+	goTestRepo(t, f)
+	task := f.task("S")
+
+	suspended, err := New(f.st, f.cfg, backend.NewFake([][]backend.ToolCall{good, good, good}),
+		WithPlanner(&recordingPlanner{plans: []planning.Plan{
+			invalidPlan("-run NoSuchTest"), invalidPlan("-run StillMissing"),
+		}})).RunTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if suspended.Status != state.NeedsHuman {
+		t.Fatalf("应挂起，实际 %s", suspended.Status)
+	}
+	if suspended.PreviousStatus != state.Planning {
+		t.Fatalf("恢复目标应为 PLANNING，实际 %s", suspended.PreviousStatus)
+	}
+
+	resumed, err := f.st.Transition(suspended.ID, suspended.Version, state.Planning,
+		map[string]any{"resumed_to": string(state.Planning)},
+		map[string]any{"fix_attempts": 0})
+	if err != nil {
+		t.Fatalf("应从 NEEDS_HUMAN 恢复到 PLANNING: %v", err)
+	}
+	done, err := New(f.st, f.cfg, backend.NewFake([][]backend.ToolCall{good, good}),
+		WithPlanner(&recordingPlanner{plans: []planning.Plan{validPlan()}})).RunTask(resumed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != state.Done {
+		t.Fatalf("恢复后应完成，实际 %s", done.Status)
+	}
+}
+
 // 主验证通过、只有 grep 断言匹配不到时，应如实归因为“验收标准可能写错”。
 func TestAuxiliaryOnlyFailureReportsPlanIssue(t *testing.T) {
 	f := setup(t)

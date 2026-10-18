@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"agentdev/internal/config"
 	"agentdev/internal/state"
 	"agentdev/internal/store"
 	"agentdev/internal/testutil"
@@ -22,6 +24,97 @@ type stubIssueReader struct {
 func (s *stubIssueReader) Read(_ context.Context, repo string, number int64) (githubIssue, error) {
 	s.repo, s.num = repo, number
 	return s.issue, nil
+}
+
+// G-06：审批时可替换计划，但只能收紧写入范围，不能扩大。
+func TestApproveWithEditedPlan(t *testing.T) {
+	home := writeHome(t, testutil.NewRepo(t))
+	taskID := createTask(t, home, "--level", "M")
+	script := writeScript(t, home, "good.json", goodStep())
+	if code, out, _ := invoke(t, "run", "--backend", "fake", "--script", script, "--task", taskID, "--home", home); code != ExitHuman {
+		t.Fatalf("M 级应等待审批 (%d): %s", code, out)
+	}
+
+	// 合法：把范围收紧到单个文件，并把验收标准改成 command 检查。
+	narrowed := `{
+	  "status": "ready",
+	  "summary": "只改 hello.txt",
+	  "scope": {"allowed_paths": ["hello.txt"]},
+	  "steps": [{"id": "s1", "description": "写文件", "files": ["hello.txt"]}],
+	  "acceptance": [{"id": "a1", "description": "验证通过", "check": {"type": "command", "name": "check"}}]
+	}`
+	planFile := filepath.Join(home, "plan.json")
+	if err := os.WriteFile(planFile, []byte(narrowed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut := invoke(t, "task", "approve", taskID, "--plan", planFile, "--home", home)
+	if code != ExitOK {
+		t.Fatalf("带计划的审批应成功 (%d): %s", code, errOut)
+	}
+	if !strings.Contains(out, "计划已更新") {
+		t.Errorf("输出应说明计划已更新: %s", out)
+	}
+
+}
+
+// 审批修改计划时，范围只能收紧、不能扩大（对照原计划的 allowed_paths）。
+func TestVettedPlanFileScopeRules(t *testing.T) {
+	home := t.TempDir()
+	cfg := &config.App{
+		Home: home,
+		Repos: map[string]config.RepoConfig{
+			"acme/app": {
+				LocalPath:      home,
+				DefaultBranch:  "main",
+				VerifyCommands: config.VerifyCommands{{Name: "check", Command: "go run check.go"}},
+				BudgetUSD:      2,
+			},
+		},
+	}
+	original := `{"status":"ready","summary":"x","scope":{"allowed_paths":["src/**"]},
+	  "acceptance":[{"id":"a1","description":"ok","check":{"type":"command","name":"check"}}]}`
+	task := store.Task{Repo: "acme/app", PlanJSON: original}
+
+	writePlan := func(body string) string {
+		path := filepath.Join(t.TempDir(), "plan.json")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	narrowed := `{"status":"ready","summary":"收紧","scope":{"allowed_paths":["src/a.go"]},
+	  "acceptance":[{"id":"a1","description":"ok","check":{"type":"command","name":"check"}}]}`
+	if _, err := vettedPlanFile(cfg, task, writePlan(narrowed)); err != nil {
+		t.Errorf("收紧范围应允许: %v", err)
+	}
+
+	expanded := `{"status":"ready","summary":"扩大","scope":{"allowed_paths":["**"]},
+	  "acceptance":[{"id":"a1","description":"ok","check":{"type":"command","name":"check"}}]}`
+	if _, err := vettedPlanFile(cfg, task, writePlan(expanded)); err == nil {
+		t.Error("扩大写入范围应被拒绝")
+	}
+
+	needsInfo := `{"status":"needs_info","questions":["?"],"summary":"x"}`
+	if _, err := vettedPlanFile(cfg, task, writePlan(needsInfo)); err == nil {
+		t.Error("审批用计划不能是 needs_info")
+	}
+}
+
+func TestApproveRejectsInvalidPlanFile(t *testing.T) {
+	home := writeHome(t, testutil.NewRepo(t))
+	taskID := createTask(t, home, "--level", "M")
+	script := writeScript(t, home, "good.json", goodStep())
+	invoke(t, "run", "--backend", "fake", "--script", script, "--task", taskID, "--home", home)
+
+	bad := filepath.Join(home, "bad.json")
+	if err := os.WriteFile(bad, []byte(`{"status":"ready","summary":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := invoke(t, "task", "approve", taskID, "--plan", bad, "--home", home)
+	if code != ExitUsage || !strings.Contains(errOut, "计划校验失败") {
+		t.Errorf("缺少验收标准应被拒绝 (%d): %s", code, errOut)
+	}
 }
 
 // G-05：logs 输出完整审计时间线，并支持 --limit 与 --json。
