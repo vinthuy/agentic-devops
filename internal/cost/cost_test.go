@@ -21,6 +21,24 @@ func TestTableComputesCostPerMillionTokens(t *testing.T) {
 	}
 }
 
+func TestTableCostCachePricing(t *testing.T) {
+	tbl := Table{"m": {CacheRead: 500_000, CacheWrite: 250_000}}
+	usd, ok := tbl.Cost("m", llm.Usage{
+		InputTokens: 0, OutputTokens: 0, CacheReadTokens: 2, CacheWriteTokens: 4,
+	})
+	if !ok {
+		t.Fatal("已配置单价的模型应返回 ok")
+	}
+	// 2*500000/1e6 + 4*250000/1e6 = 1 + 1 = 2
+	if usd != 2 {
+		t.Errorf("缓存读写费用计算错误: %v", usd)
+	}
+
+	if usd, ok := tbl.Cost("unknown", llm.Usage{CacheReadTokens: 100, CacheWriteTokens: 100}); ok || usd != 0 {
+		t.Errorf("未配置单价应返回 (0,false)，实际 (%v,%v)", usd, ok)
+	}
+}
+
 func TestTableUnknownModelReturnsNotOK(t *testing.T) {
 	tbl := Table{}
 	if usd, ok := tbl.Cost("ghost", llm.Usage{InputTokens: 1000}); ok || usd != 0 {
