@@ -107,16 +107,16 @@
 
 | 领域 | 选择 | 理由 |
 |---|---|---|
-| 语言 | Python 3.11+ | 生态成熟，适合 Agent 与脚本类任务，团队易上手 |
-| CLI | Typer + Rich | 开发快，输出美观 |
-| 配置校验 | Pydantic v2 | 强类型，YAML 校验清晰 |
-| 模型调用 | `anthropic` 官方 SDK | 原生 tool use 支持，便于流式与计费统计 |
-| 存储 | SQLite（WAL 模式） | 单机足够，无需运维 |
-| Git 操作 | 直接调用 `git` 命令（subprocess） | 行为可预期，便于排错，比 GitPython 更贴近实际 |
+| 语言 | Go 1.25+ | 单二进制分发，无运行时依赖；并发与子进程控制成熟（已由 Python 原型迁移，见 ADR-11） |
+| CLI | cobra | 子命令与全局参数（`--home`）标准做法 |
+| 配置校验 | `gopkg.in/yaml.v3` + 显式校验函数 | YAML 保留声明顺序（验证命令按序执行）；错误信息汇总输出 |
+| 模型调用 | `net/http` 直接实现 Messages 协议 | 无 SDK 依赖；同一协议可指向 Anthropic 或 DeepSeek 兼容端点；原样回传思考块 |
+| 存储 | SQLite（WAL 模式），`modernc.org/sqlite` | 纯 Go 驱动，无需 cgo，Windows 下免编译器；`_txlock=immediate` 对应写事务串行化 |
+| Git 操作 | 直接调用 `git` 命令（`os/exec`） | 行为可预期，便于排错 |
 | GitHub | `gh` CLI 为主，必要时 REST | `gh` 已处理认证；减少 Token 管理代码 |
 | 密钥扫描 | 内置正则 + 可选调用 `gitleaks` | 无外部依赖也可工作 |
-| 日志 | `structlog` 或标准库 `logging` + JSON Formatter | 结构化、可检索 |
-| 测试 | pytest + 录制的模型响应（fixture） | 避免测试消耗真实费用 |
+| 日志 | 标准库 `log/slog`（JSON Handler） | 结构化、可检索，无第三方依赖 |
+| 测试 | `go test` + `httptest` 模拟模型端点 | 避免测试消耗真实费用；临时 git 仓库做集成测试 |
 | 沙箱（M2） | Docker Desktop（WSL2 后端） | 与 Windows 开发环境兼容 |
 
 **平台注意事项（Windows）**：
@@ -904,6 +904,8 @@ agentic-devops/
 | ADR-08 | 默认 Draft PR，不自动合并 | 直接 Ready for Review | 与 PRD 中的信任策略一致，降低误合并风险 |
 | ADR-09 | 验收标准必须映射到可执行检查 | 允许自然语言验收 | 解决“自证通过”问题，是本系统的核心差异点 |
 | ADR-10 | 运行数据与代码仓库分离（`AGENTDEV_HOME`） | 数据存于项目目录 | 避免误提交；便于多项目共享 |
+| ADR-11 | 技术栈由 Python 迁移到 Go | 保留 Python 原型 | 单二进制便于分发与部署；子进程与并发模型更直接。Python 原型保留在 `legacy-python/` 作为行为参考，功能对齐后删除 |
+| ADR-12 | 模型后端采用 Anthropic Messages 协议 + 可配置 `base_url` | 绑定单一厂商 SDK | DeepSeek 等提供兼容端点，切换模型只需改配置与环境变量 |
 
 ---
 
