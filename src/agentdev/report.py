@@ -53,7 +53,7 @@ def _render(
         f"- 基线提交: {task.base_sha or '-'}",
         f"- 提交: {task.commit_sha or '-'}",
         f"- 修复次数: {task.fix_attempts}",
-        f"- 预算: ${task.budget_usd:.2f}（已用 ${task.spent_usd:.4f}）",
+        f"- 预算: ${task.budget_usd:.2f}（计费尚未实现，未统计实际花费）",
         "",
         "## 需求",
         "",
