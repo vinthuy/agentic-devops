@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"agentdev/internal/llm"
@@ -222,6 +223,8 @@ type Requirement struct {
 	VerifyNames []string
 	Commands    map[string]string
 	RepoSummary string
+	// FileSnippets 是需求中点名的文件内容，用于避免“请提供文件内容”的假澄清。
+	FileSnippets map[string]string
 }
 
 // Planner 生成实施计划。
@@ -259,6 +262,19 @@ func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) 
 		fmt.Fprintf(&b, "仓库文件概览:\n%s\n", req.RepoSummary)
 	}
 	b.WriteString("</repo_context>")
+
+	if len(req.FileSnippets) > 0 {
+		paths := make([]string, 0, len(req.FileSnippets))
+		for path := range req.FileSnippets {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		b.WriteString("\n<mentioned_files trusted=\"true\">\n")
+		for _, path := range paths {
+			fmt.Fprintf(&b, "<file path=\"%s\">\n%s\n</file>\n", path, req.FileSnippets[path])
+		}
+		b.WriteString("</mentioned_files>")
+	}
 
 	resp, input, err := p.Client.CallTool(ctx, llm.Request{
 		Model:     p.Model,

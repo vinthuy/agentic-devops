@@ -319,13 +319,14 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 // planStep 生成结构化计划。需求不清时进入 NEEDS_INFO；M 级任务进入 AWAITING_APPROVAL。
 func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.Task, error) {
 	req := planning.Requirement{
-		TaskID:      task.ID,
-		Source:      task.Source,
-		Text:        task.Requirement,
-		Feedback:    planFeedback(o.store, task.ID),
-		VerifyNames: verifyNames(repo),
-		Commands:    commandMap(repo),
-		RepoSummary: repoSummary(repo.LocalPath),
+		TaskID:       task.ID,
+		Source:       task.Source,
+		Text:         task.Requirement,
+		Feedback:     planFeedback(o.store, task.ID),
+		VerifyNames:  verifyNames(repo),
+		Commands:     commandMap(repo),
+		RepoSummary:  repoSummary(repo.LocalPath),
+		FileSnippets: planning.MentionedFiles(task.Requirement, repo.LocalPath, 3, 4000),
 	}
 
 	planner := o.planner
