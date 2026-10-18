@@ -60,6 +60,8 @@ class ModelsConfig(BaseModel):
     provider: str = "anthropic"
     model: str = "claude-sonnet-5-5"
     max_tokens: int = 8192
+    base_url: str | None = None
+    api_key_env: str = "ANTHROPIC_API_KEY"
 
 
 class DeliveryConfig(BaseModel):

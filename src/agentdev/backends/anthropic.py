@@ -16,15 +16,30 @@ def _block_to_param(block: Any) -> dict[str, Any]:
         return {"type": "text", "text": block.text}
     if block.type == "tool_use":
         return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+    if block.type == "thinking":
+        return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
+    if block.type == "redacted_thinking":
+        return {"type": "redacted_thinking", "data": block.data}
     raise BackendError(f"未支持的内容块类型: {block.type}")
 
 
 class AnthropicBackend:
-    """基于 Anthropic Messages API 的工具调用循环（SDD 5.3）。"""
+    """基于 Anthropic Messages 协议的工具调用循环（SDD 5.3）。
+
+    同一协议可指向 Anthropic 官方或任何兼容端点（如 DeepSeek 的 base_url）。
+    """
 
     name = "anthropic"
 
-    def __init__(self, model: str, max_tokens: int, client: Any | None = None):
+    def __init__(
+        self,
+        model: str,
+        max_tokens: int,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        client: Any | None = None,
+    ):
         self.model = model
         self.max_tokens = max_tokens
         if client is None:
@@ -34,7 +49,12 @@ class AnthropicBackend:
                 raise BackendUnavailable(
                     "未安装 anthropic SDK，请执行: pip install -e \".[anthropic]\""
                 ) from e
-            client = anthropic.Anthropic()
+            kwargs: dict[str, Any] = {}
+            if base_url:
+                kwargs["base_url"] = base_url
+            if api_key:
+                kwargs["api_key"] = api_key
+            client = anthropic.Anthropic(**kwargs)
         self.client = client
         self.system_prompt = load_prompt("coder.v1.md")
 

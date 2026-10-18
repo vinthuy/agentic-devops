@@ -79,7 +79,8 @@ def doctor(home: HomeOption = home_option) -> None:
 
     checks.append((shutil.which("git") is not None, True, "git 可用"))
     checks.append((shutil.which("gh") is not None, False, "gh CLI 可用（推送功能需要）"))
-    checks.append((bool(os.environ.get("ANTHROPIC_API_KEY")), False, "ANTHROPIC_API_KEY 已设置（真实模型需要）"))
+    key_env = config.models.api_key_env
+    checks.append((bool(os.environ.get(key_env)), False, f"{key_env} 已设置（真实模型需要）"))
 
     try:
         config.home.mkdir(parents=True, exist_ok=True)
@@ -240,8 +241,17 @@ def _make_backend(config: AppConfig, name: str, script: Optional[Path]):
     if name == "anthropic":
         from agentdev.backends.anthropic import AnthropicBackend
 
+        key_env = config.models.api_key_env
+        api_key = os.environ.get(key_env)
+        if not api_key:
+            _fail(f"未设置环境变量 {key_env}（见 models.yaml 的 api_key_env）", EXIT_USAGE)
         try:
-            return AnthropicBackend(config.models.model, config.models.max_tokens)
+            return AnthropicBackend(
+                config.models.model,
+                config.models.max_tokens,
+                base_url=config.models.base_url,
+                api_key=api_key,
+            )
         except BackendUnavailable as e:
             _fail(str(e), EXIT_USAGE)
     if name == "fake":

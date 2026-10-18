@@ -1,9 +1,12 @@
-# 模型 ID 以官方文档为准：https://platform.claude.com/docs/en/models/overview
-# 4.6 世代及之后的 ID 为固定快照（如 claude-sonnet-5-5），不是会自动升级的别名。
-provider: anthropic
-model: claude-sonnet-5-5     # 编码用，性能与速度的平衡
+# 当前使用 DeepSeek 的 Anthropic 兼容端点。
+# 文档：https://api-docs.deepseek.com/guides/anthropic_api
+# 复制到 AGENTDEV_HOME 下使用。
+provider: anthropic            # 协议类型：Anthropic Messages 协议
+base_url: https://api.deepseek.com/anthropic
+api_key_env: DEEPSEEK_API_KEY  # 从该环境变量读取 Key，不写入文件
+model: deepseek-v4-pro         # 编码用；成本优先可改为 deepseek-flash
 max_tokens: 8192
-# 参考单价（USD / 百万 token，输入 / 输出）：
-#   claude-opus-5-5    $4 / $20
-#   claude-sonnet-5-5  $2 / $10
-#   claude-haiku-5-5   $0.10 / $0.50 起
+# 参考单价（USD / 百万 token，输入未命中缓存 / 输出；非高峰 / 高峰）：
+#   deepseek-v4-pro  $0.66 / $1.98  ；  $1.32 / $3.96
+#   deepseek-flash   $0.15 / $0.60  ；  $0.30 / $1.20
+# 高峰时段：01:00-04:00、06:00-10:00 UTC（周一至周五，节假日除外）。
