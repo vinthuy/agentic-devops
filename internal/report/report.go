@@ -30,6 +30,10 @@ func WriteRunArtifacts(repo store.Repository, cfg *config.App, taskID string) (s
 	if err != nil {
 		return "", err
 	}
+	costs, err := repo.ListCosts(taskID)
+	if err != nil {
+		return "", err
+	}
 
 	dir := filepath.Join(cfg.RunsDir(), taskID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -50,14 +54,17 @@ func WriteRunArtifacts(repo store.Repository, cfg *config.App, taskID string) (s
 	}
 
 	reportPath := filepath.Join(dir, "report.md")
-	content := render(task, events, violations, verifications, time.Now().UTC().Format(time.RFC3339))
+	content := render(task, events, violations, verifications, costs, time.Now().UTC().Format(time.RFC3339))
 	if err := os.WriteFile(reportPath, []byte(content), 0o644); err != nil {
 		return "", err
 	}
 	return reportPath, nil
 }
 
-func render(task store.Task, events []store.Event, violations []store.Violation, verifications []store.Verification, generatedAt string) string {
+func render(
+	task store.Task, events []store.Event, violations []store.Violation,
+	verifications []store.Verification, costs []store.CostEntry, generatedAt string,
+) string {
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	orDash := func(s string) string {
@@ -76,8 +83,11 @@ func render(task store.Task, events []store.Event, violations []store.Violation,
 	line("- 分支: %s", orDash(task.Branch))
 	line("- 基线提交: %s", orDash(task.BaseSHA))
 	line("- 提交: %s", orDash(task.CommitSHA))
+	if task.PRURL != "" {
+		line("- 草稿 PR: %s (#%d)", task.PRURL, task.PRNumber)
+	}
 	line("- 修复次数: %d", task.FixAttempts)
-	line("- 预算: $%.2f（计费尚未实现，未统计实际花费）", task.BudgetUSD)
+	line("- 预算: $%.2f，已用: $%.4f", task.BudgetUSD, task.SpentUSD)
 	line("")
 	line("## 需求")
 	line("")
@@ -101,8 +111,43 @@ func render(task store.Task, events []store.Event, violations []store.Violation,
 					m["command"], m["name"], m["exit_code"], m["duration_s"], m["log_path"])
 			}
 		}
+		if acceptance, ok := v.Report["acceptance"].([]any); ok && len(acceptance) > 0 {
+			line("")
+			line("验收标准：")
+			for _, a := range acceptance {
+				m, _ := a.(map[string]any)
+				flag := "未满足"
+				if p, _ := m["passed"].(bool); p {
+					flag = "满足"
+				}
+				line("- [%v] %v：%s", m["id"], m["description"], flag)
+			}
+		}
 		line("")
 	}
+
+	line("## 成本")
+	line("")
+	if len(costs) == 0 {
+		line("无计费记录（可能是未调用模型，或模型未配置单价）。")
+	} else {
+		byRole := map[string]float64{}
+		var total float64
+		for _, c := range costs {
+			byRole[c.Role] += c.CostUSD
+			total += c.CostUSD
+		}
+		line("| 角色 | 模型 | 输入 | 输出 | 缓存读 | 缓存写 | 费用 |")
+		line("| --- | --- | --- | --- | --- | --- | --- |")
+		for _, c := range costs {
+			line("| %s | %s | %d | %d | %d | %d | $%.6f |",
+				c.Role, c.Model, c.InputTokens, c.OutputTokens,
+				c.CacheReadTokens, c.CacheWriteTokens, c.CostUSD)
+		}
+		line("")
+		line("合计: $%.6f（预算 $%.2f）", total, task.BudgetUSD)
+	}
+	line("")
 
 	line("## 策略违规")
 	line("")

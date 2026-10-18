@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"agentdev/internal/llm"
 	"agentdev/internal/tools"
 )
 
@@ -25,10 +26,7 @@ func IsBackendError(err error) bool {
 	return errors.As(err, &e)
 }
 
-type Usage struct {
-	InputTokens  int
-	OutputTokens int
-}
+type Usage = llm.Usage
 
 type StepContext struct {
 	TaskID         string
@@ -38,6 +36,9 @@ type StepContext struct {
 	Tools          *tools.Runtime
 	MaxTurns       int
 	FailureSummary string
+	// OnUsage 在每一轮模型调用后被调用，用于计费与预算熔断。
+	// 返回错误会中止本步骤，并把该错误向上传递。
+	OnUsage func(Usage) error
 }
 
 type StepResult struct {

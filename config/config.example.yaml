@@ -1,0 +1,21 @@
+# 复制到 AGENTDEV_HOME（默认 ~/.agentdev）下使用
+#
+# 交付：默认关闭。开启后 COMMITTING 阶段会做密钥扫描、推送分支并创建**草稿** PR。
+# 绝不自动合并；推送使用当前 git 凭据，创建 PR 使用已登录的 gh CLI。
+delivery:
+  enabled: false          # 先本地跑通再开启
+  branch_prefix: "agent/"
+  draft_pr: true          # 强烈建议保持 true
+
+# 分级：规则始终生效；use_model 时额外做一次模型估算，取更保守的结果。
+triage:
+  use_model: true
+
+# 规划：auto 用模型生成结构化计划（无模型可用时自动降级为 static）。
+# static 只把验证命令作为验收标准，不调用模型。
+planning:
+  mode: auto
+
+# 提交者身份（写入 git commit）
+git_author_name: agentdev
+git_author_email: agentdev@localhost

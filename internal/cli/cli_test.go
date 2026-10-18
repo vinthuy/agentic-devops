@@ -114,7 +114,7 @@ func TestCreateThenRunFakeThenStatus(t *testing.T) {
 func TestRunWithEmptyQueue(t *testing.T) {
 	home := writeHome(t, testutil.NewRepo(t))
 	code, out, _ := invoke(t, "run", "--backend", "fake", "--script", "unused.json", "--home", home)
-	if code != ExitOK || !strings.Contains(out, "没有排队中的任务") {
+	if code != ExitOK || !strings.Contains(out, "没有可推进的任务") {
 		t.Errorf("空队列异常 (%d): %s", code, out)
 	}
 }

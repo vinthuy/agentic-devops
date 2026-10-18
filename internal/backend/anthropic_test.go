@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"agentdev/internal/config"
+	"agentdev/internal/llm"
 	"agentdev/internal/policy"
 	"agentdev/internal/tools"
 )
@@ -82,7 +83,7 @@ func TestAnthropicRoundTripKeepsThinkingAndPairsToolResults(t *testing.T) {
 	defer srv.Close()
 
 	rt, root := newTools(t)
-	be := NewAnthropic("deepseek-v4-pro", 1024, srv.URL, "k-test")
+	be := NewAnthropic(llm.NewClient(srv.URL, "k-test"), "deepseek-v4-pro", 1024)
 	res, err := be.RunStep(StepContext{
 		TaskID: "t1", Requirement: "写 hello", Plan: "写 hello", Worktree: root,
 		Tools: rt, MaxTurns: 5,
@@ -116,7 +117,7 @@ func TestAnthropicRetriesOnRateLimit(t *testing.T) {
 	defer srv.Close()
 
 	rt, root := newTools(t)
-	be := NewAnthropic("m", 10, srv.URL, "k")
+	be := NewAnthropic(llm.NewClient(srv.URL, "k"), "m", 10)
 	res, err := be.RunStep(StepContext{TaskID: "t", Requirement: "x", Plan: "x", Worktree: root, Tools: rt, MaxTurns: 2})
 	if err != nil {
 		t.Fatalf("限流后应重试成功: %v", err)
@@ -136,7 +137,7 @@ func TestAnthropicClientErrorIsNotRetried(t *testing.T) {
 	defer srv.Close()
 
 	rt, root := newTools(t)
-	be := NewAnthropic("bad", 10, srv.URL, "k")
+	be := NewAnthropic(llm.NewClient(srv.URL, "k"), "bad", 10)
 	_, err := be.RunStep(StepContext{TaskID: "t", Requirement: "x", Plan: "x", Worktree: root, Tools: rt, MaxTurns: 2})
 	if !IsBackendError(err) {
 		t.Errorf("400 应当返回可恢复的后端错误: %v", err)
@@ -153,7 +154,7 @@ func TestAnthropicMaxTurnsExceeded(t *testing.T) {
 	defer srv.Close()
 
 	rt, root := newTools(t)
-	be := NewAnthropic("m", 10, srv.URL, "k")
+	be := NewAnthropic(llm.NewClient(srv.URL, "k"), "m", 10)
 	_, err := be.RunStep(StepContext{TaskID: "t", Requirement: "x", Plan: "x", Worktree: root, Tools: rt, MaxTurns: 2})
 	if !IsBackendError(err) {
 		t.Errorf("超过最大轮数应当返回可恢复错误: %v", err)

@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS locks (
 // 允许通过 Transition 更新的字段。
 var updatableFields = map[string]bool{
 	"title": true, "source": true, "source_ref": true, "level": true, "level_override": true,
+	"requirement":     true,
 	"previous_status": true, "plan_json": true, "branch": true, "worktree_path": true,
 	"base_sha": true, "commit_sha": true, "pr_number": true, "pr_url": true,
 	"fix_attempts": true, "ci_attempts": true, "budget_usd": true, "spent_usd": true,
@@ -141,13 +142,14 @@ type Task struct {
 }
 
 type NewTask struct {
-	Repo        string
-	Requirement string
-	BudgetUSD   float64
-	Level       string
-	Title       string
-	Source      string
-	SourceRef   string
+	Repo          string
+	Requirement   string
+	BudgetUSD     float64
+	Level         string
+	LevelOverride bool
+	Title         string
+	Source        string
+	SourceRef     string
 }
 
 type Event struct {
@@ -173,12 +175,31 @@ type Verification struct {
 	TS      string         `json:"ts"`
 }
 
+// CostEntry 是一次模型调用的计费记录。
+type CostEntry struct {
+	TS               string  `json:"ts"`
+	Role             string  `json:"role"`
+	Model            string  `json:"model"`
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	CacheReadTokens  int     `json:"cache_read_tokens"`
+	CacheWriteTokens int     `json:"cache_write_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
+}
+
+type Interaction struct {
+	TS      string `json:"ts"`
+	Kind    string `json:"kind"`
+	Content string `json:"content"`
+}
+
 // Repository 是任务持久化的抽象。当前实现为 SQLite，后续可增加 PostgreSQL 实现。
 type Repository interface {
 	CreateTask(t NewTask) (Task, error)
 	GetTask(id string) (Task, error)
 	ListTasks(status state.Status, repo string) ([]Task, error)
 	NextQueued() (Task, bool, error)
+	NextRunnable() (Task, bool, error)
 	Transition(id string, expectedVersion int64, to state.Status, payload map[string]any, fields map[string]any) (Task, error)
 	AppendEvent(taskID, eventType string, payload map[string]any) error
 	ListEvents(taskID string) ([]Event, error)
@@ -186,6 +207,11 @@ type Repository interface {
 	ListViolations(taskID string) ([]Violation, error)
 	RecordVerification(taskID string, attempt int, passed bool, report map[string]any) error
 	ListVerifications(taskID string) ([]Verification, error)
+	RecordCost(taskID, role, model string, entry CostEntry) error
+	ListCosts(taskID string) ([]CostEntry, error)
+	AddSpend(taskID string, delta float64) error
+	RecordInteraction(taskID, kind, content string) error
+	ListInteractions(taskID string) ([]Interaction, error)
 	Close() error
 }
 
@@ -236,10 +262,11 @@ func (s *SQLiteStore) CreateTask(t NewTask) (Task, error) {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(
-		`INSERT INTO tasks (id, repo, title, requirement, source, source_ref, level, status,
-		 budget_usd, version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,0,?,?)`,
+		`INSERT INTO tasks (id, repo, title, requirement, source, source_ref, level, level_override, status,
+		 budget_usd, version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?)`,
 		id, t.Repo, nullable(t.Title), t.Requirement, orDefault(t.Source, "cli"),
-		nullable(t.SourceRef), nullable(t.Level), string(state.Queued), t.BudgetUSD, ts, ts,
+		nullable(t.SourceRef), nullable(t.Level), boolInt(t.LevelOverride), string(state.Queued),
+		t.BudgetUSD, ts, ts,
 	); err != nil {
 		return Task{}, err
 	}
@@ -337,8 +364,29 @@ func (s *SQLiteStore) ListTasks(status state.Status, repo string) ([]Task, error
 }
 
 func (s *SQLiteStore) NextQueued() (Task, bool, error) {
-	row := s.db.QueryRow("SELECT "+taskColumns+" FROM tasks WHERE status = ? ORDER BY rowid LIMIT 1",
-		string(state.Queued))
+	return s.nextByStatus([]state.Status{state.Queued})
+}
+
+// RunnableStatuses 是可以被编排器继续推进的状态集合（含恢复场景）。
+var RunnableStatuses = []state.Status{
+	state.Queued, state.Triaging, state.Planning, state.Coding, state.Verifying,
+	state.Committing, state.Pushed, state.PROpened,
+}
+
+// NextRunnable 取下一个可推进的任务：新任务或上次中断在中间状态的任务。
+func (s *SQLiteStore) NextRunnable() (Task, bool, error) {
+	return s.nextByStatus(RunnableStatuses)
+}
+
+func (s *SQLiteStore) nextByStatus(statuses []state.Status) (Task, bool, error) {
+	placeholders := make([]string, 0, len(statuses))
+	args := make([]any, 0, len(statuses))
+	for _, st := range statuses {
+		placeholders = append(placeholders, "?")
+		args = append(args, string(st))
+	}
+	row := s.db.QueryRow("SELECT "+taskColumns+" FROM tasks WHERE status IN ("+
+		strings.Join(placeholders, ",")+") ORDER BY rowid LIMIT 1", args...)
 	t, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, false, nil
@@ -534,4 +582,74 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// RecordCost 写入一条计费明细。
+func (s *SQLiteStore) RecordCost(taskID, role, model string, entry CostEntry) error {
+	_, err := s.db.Exec(
+		`INSERT INTO cost_ledger (task_id, ts, role, model, input_tokens, output_tokens,
+		 cache_read_tokens, cache_write_tokens, cost_usd) VALUES (?,?,?,?,?,?,?,?,?)`,
+		taskID, orNow(entry.TS), role, model, entry.InputTokens, entry.OutputTokens,
+		entry.CacheReadTokens, entry.CacheWriteTokens, entry.CostUSD)
+	return err
+}
+
+func orNow(ts string) string {
+	if ts == "" {
+		return now()
+	}
+	return ts
+}
+
+func (s *SQLiteStore) ListCosts(taskID string) ([]CostEntry, error) {
+	rows, err := s.db.Query(
+		`SELECT ts, role, model, input_tokens, output_tokens, cache_read_tokens,
+		 cache_write_tokens, cost_usd FROM cost_ledger WHERE task_id = ? ORDER BY id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CostEntry
+	for rows.Next() {
+		var e CostEntry
+		if err := rows.Scan(&e.TS, &e.Role, &e.Model, &e.InputTokens, &e.OutputTokens,
+			&e.CacheReadTokens, &e.CacheWriteTokens, &e.CostUSD); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// AddSpend 累加任务花费。故意不改动 version，避免与正在进行的转换争抢乐观锁。
+func (s *SQLiteStore) AddSpend(taskID string, delta float64) error {
+	_, err := s.db.Exec(
+		"UPDATE tasks SET spent_usd = spent_usd + ?, updated_at = ? WHERE id = ?",
+		delta, now(), taskID)
+	return err
+}
+
+func (s *SQLiteStore) RecordInteraction(taskID, kind, content string) error {
+	_, err := s.db.Exec(
+		"INSERT INTO interactions (task_id, ts, kind, content) VALUES (?,?,?,?)",
+		taskID, now(), kind, content)
+	return err
+}
+
+func (s *SQLiteStore) ListInteractions(taskID string) ([]Interaction, error) {
+	rows, err := s.db.Query(
+		"SELECT ts, kind, content FROM interactions WHERE task_id = ? ORDER BY id", taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Interaction
+	for rows.Next() {
+		var i Interaction
+		if err := rows.Scan(&i.TS, &i.Kind, &i.Content); err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rows.Err()
 }

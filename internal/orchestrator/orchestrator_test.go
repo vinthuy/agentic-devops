@@ -36,6 +36,7 @@ func setup(t *testing.T) *fixture {
 			"acme/app": {
 				LocalPath:         repoPath,
 				DefaultBranch:     "main",
+				Remote:            "origin",
 				VerifyCommands:    config.VerifyCommands{{Name: "check", Command: "go run check.go"}},
 				VerifyConfigFiles: []string{"check.go"},
 				BudgetUSD:         2,
@@ -64,10 +65,34 @@ func setup(t *testing.T) *fixture {
 func (f *fixture) task(level string) store.Task {
 	f.t.Helper()
 	task, err := f.st.CreateTask(store.NewTask{
-		Repo:        "acme/app",
-		Requirement: "在仓库根目录创建 hello.txt，内容为 hello",
-		BudgetUSD:   2,
-		Level:       level,
+		Repo:          "acme/app",
+		Requirement:   "在仓库根目录创建 hello.txt，内容为 hello",
+		BudgetUSD:     2,
+		Level:         level,
+		LevelOverride: level != "",
+	})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return task
+}
+
+func (f *fixture) taskWithRequirement(requirement string) store.Task {
+	f.t.Helper()
+	task, err := f.st.CreateTask(store.NewTask{
+		Repo: "acme/app", Requirement: requirement, BudgetUSD: 2,
+	})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return task
+}
+
+func (f *fixture) taskWithBudget(level string, budget float64) store.Task {
+	f.t.Helper()
+	task, err := f.st.CreateTask(store.NewTask{
+		Repo: "acme/app", Requirement: "在仓库根目录创建 hello.txt，内容为 hello",
+		BudgetUSD: budget, Level: level, LevelOverride: level != "",
 	})
 	if err != nil {
 		f.t.Fatal(err)
@@ -189,12 +214,24 @@ func TestLevelLRejectedWithoutRunningBackend(t *testing.T) {
 	}
 }
 
-func TestLevelMParksForUnsupportedApproval(t *testing.T) {
+func TestLevelMParksForApproval(t *testing.T) {
 	f := setup(t)
 	task := f.task("M")
-	done := f.run(backend.NewFake(nil), task.ID)
-	if done.Status != state.NeedsHuman {
-		t.Errorf("M 级应为 NEEDS_HUMAN（审批未实现），实际 %s", done.Status)
+	be := backend.NewFake([][]backend.ToolCall{good})
+	done := f.run(be, task.ID)
+	if done.Status != state.AwaitingApproval {
+		t.Fatalf("M 级应停在 AWAITING_APPROVAL，实际 %s", done.Status)
+	}
+	if len(be.Calls) != 0 {
+		t.Error("审批前不应调用后端")
+	}
+	// 审批后继续执行，直到完成。
+	if _, err := f.st.Transition(task.ID, done.Version, state.Coding, map[string]any{"approved_by": "test"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	final := f.run(be, task.ID)
+	if final.Status != state.Done {
+		t.Fatalf("审批后应完成，实际 %s（%s）", final.Status, lastReason(t, f.st, task.ID))
 	}
 }
 

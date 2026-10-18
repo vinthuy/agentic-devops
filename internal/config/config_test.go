@@ -103,11 +103,41 @@ func TestValidateRejectsEmptyVerifyAndBadBudget(t *testing.T) {
 	}
 }
 
-func TestDeliveryEnabledRejectedInM0(t *testing.T) {
+func TestDeliveryEnabledKeepsDefaults(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, home, "config.yaml", "delivery:\n  enabled: true\n")
-	if _, err := Load(home); err == nil || !strings.Contains(err.Error(), "尚未实现") {
-		t.Errorf("delivery.enabled=true 应当被拒绝: %v", err)
+	cfg, err := Load(home)
+	if err != nil {
+		t.Fatalf("delivery.enabled=true 现在应当被接受: %v", err)
+	}
+	if !cfg.Delivery.Enabled {
+		t.Error("delivery.enabled 应为 true")
+	}
+	// 未在配置中出现的字段必须保留默认值，否则分支命名会变成空前缀。
+	if cfg.Delivery.BranchPrefix != "agent/" {
+		t.Errorf("branch_prefix 应保留默认值，实际 %q", cfg.Delivery.BranchPrefix)
+	}
+	if !cfg.Delivery.DraftPR {
+		t.Error("draft_pr 应默认为 true")
+	}
+}
+
+func TestDeliveryRejectsEmptyBranchPrefix(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, "repos.yaml", "repos:\n  acme/app:\n    local_path: /tmp/x\n    verify_commands:\n      test: echo ok\n")
+	writeFile(t, home, "config.yaml", "delivery:\n  enabled: true\n  branch_prefix: \"\"\n")
+	_, err := Load(home)
+	if err == nil || !strings.Contains(err.Error(), "branch_prefix") {
+		t.Errorf("空 branch_prefix 应当被拒绝: %v", err)
+	}
+}
+
+func TestPlanningModeValidated(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, "config.yaml", "planning:\n  mode: nonsense\n")
+	_, err := Load(home)
+	if err == nil || !strings.Contains(err.Error(), "planning.mode") {
+		t.Errorf("非法 planning.mode 应当被拒绝: %v", err)
 	}
 }
 

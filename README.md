@@ -10,14 +10,15 @@
 
 Go 1.25+。已从 Python 原型迁移（见 SDD ADR-11）；Python 原型已删除，历史见 git 提交 `05f080c` 及之前。
 
-## 当前状态（M0 原型）
+## 当前状态（M1）
 
 已实现：状态机、SQLite 持久化（乐观锁）、策略引擎、工具运行时、git worktree 工作区、
 验证命令执行、防作弊检查、Anthropic 协议后端（可指向 DeepSeek 等兼容端点）、
-编排器、运行报告、CLI。
+**结构化计划与机器可校验的验收标准**、**规则+模型分级**、**M 级审批**、**成本核算与预算熔断**、
+**密钥扫描 + 推送 + 草稿 PR**、**中断恢复**、运行报告、CLI。
 
-未实现（见实施方案 1.2）：Planner 模型计划、模型分级、M 级审批、推送与 PR、CI 监听、
-Docker 沙箱、成本与预算熔断。
+未实现（属 M2）：`REVIEWING` / `CI_WATCHING`（CI 监听与红 CI 自动修复）、Docker 沙箱、
+多租户与并发调度。
 
 ## 构建与测试
 
@@ -33,7 +34,8 @@ export AGENTDEV_HOME=~/.agentdev              # 数据目录，也可用 --home 
 mkdir -p $AGENTDEV_HOME
 cp config/repos.example.yaml  $AGENTDEV_HOME/repos.yaml    # 修改 local_path 与验证命令
 cp config/policy.example.yaml $AGENTDEV_HOME/policy.yaml
-cp config/models.example.yaml $AGENTDEV_HOME/models.yaml   # 默认即 DeepSeek 配置
+cp config/models.example.yaml $AGENTDEV_HOME/models.yaml   # DeepSeek 配置与单价
+cp config/config.example.yaml $AGENTDEV_HOME/config.yaml   # 交付 / 分级 / 规划开关
 
 export DEEPSEEK_API_KEY=sk-...                # Key 只从环境变量读取，不写入文件
 
@@ -42,13 +44,54 @@ agentdev config validate
 agentdev task create --repo acme/web-app --text "修复登录页邮箱含 + 号时校验失败"
 agentdev run                                  # 默认 --backend anthropic（协议），指向 DeepSeek
 agentdev task status <task-id>
+agentdev cost <task-id>                       # 花费明细
 ```
 
 `--home` 是全局参数，可以放在任何子命令之后。
 
-运行结果位于 `$AGENTDEV_HOME/runs/<task-id>/report.md`。任务的修改位于
-`agent/<task-id>-<slug>` 分支（worktree 在 `$AGENTDEV_HOME/workspaces/`），
-本轮不会推送到远程。
+运行结果位于 `$AGENTDEV_HOME/runs/<task-id>/report.md`（含验证记录、验收标准、成本明细、
+事件时间线）。任务的修改位于 `agent/<task-id>-<slug>` 分支，worktree 在
+`$AGENTDEV_HOME/workspaces/`。
+
+### 分级与人工介入
+
+- `--level` 缺省时自动分级：命中敏感区域/大范围改动的需求会升级为 M 或 L。
+  L 级直接拒绝，M 级停在 `AWAITING_APPROVAL`。
+- 需求信息不足时停在 `NEEDS_INFO` 并列出澄清问题。
+- 需要人工介入的命令（退出码 3 表示需要人工处理）：
+
+```bash
+agentdev task approve <id> --by 张三        # 审批 M 级任务
+agentdev task reply   <id> --text "只改前端" # 回答澄清问题
+agentdev task resume  <id>                  # 恢复 NEEDS_HUMAN（会重置修复次数）
+agentdev task cancel  <id> --reason "作废"   # 取消
+agentdev run --task <id>                    # 继续推进指定任务
+agentdev run --max 5                        # 一次连续推进多个任务
+```
+
+### 成本与预算
+
+`models.yaml` 的 `pricing` 按“每百万 token”配置单价；预算取 `repos.yaml` 的 `budget_usd`
+（或 `task create --budget`）。达到预算的 80% 记一次预警事件，达到 100% 立即停止调用模型
+并转 `NEEDS_HUMAN`。未配置单价的模型按 $0 记账，但会显式记录事件并在报告中提示，
+不会把“未知”当成“免费”。
+
+### 推送与草稿 PR
+
+默认关闭。确认本地流程可用后再开启：
+
+```yaml
+# config.yaml
+delivery:
+  enabled: true
+  branch_prefix: "agent/"
+  draft_pr: true     # 强烈建议保持 true
+```
+
+开启后 `COMMITTING` 阶段会：密钥扫描 → 推送分支 → `gh pr create --draft`。
+密钥扫描命中会**阻止推送**并挂起等待人工处理。推送使用当前 git 凭据，
+创建 PR 使用已登录的 `gh` CLI——本项目不保存任何 token。
+也可以只对单次运行强制开启：`agentdev run --push`。
 
 ## 目录
 
@@ -62,9 +105,14 @@ internal/
   policy/           路径与命令策略
   tools/            模型可调用的工具
   workspace/        git worktree、diff、提交
-  verify/           验证命令与防作弊检查
+  verify/           验证命令、验收标准求值、防作弊检查
+  llm/              Anthropic Messages 协议客户端
+  cost/             单价表与费用换算
+  triage/           分级（规则 + 模型估算）
+  planning/         结构化计划与验收标准
+  delivery/         密钥扫描、推送、草稿 PR
   backend/          执行后端（Fake、Anthropic 协议）
-  orchestrator/     任务主流程
+  orchestrator/     状态机驱动器
   report/           运行报告
   testutil/         测试用临时 git 仓库
 config/             配置模板

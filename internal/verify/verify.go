@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"agentdev/internal/config"
+	"agentdev/internal/planning"
 	"agentdev/internal/policy"
 	"agentdev/internal/tools"
 	"agentdev/internal/workspace"
@@ -27,12 +28,27 @@ type Outcome struct {
 }
 
 type Report struct {
-	Passed   bool
-	Outcomes []Outcome
+	Passed     bool
+	Outcomes   []Outcome
+	Acceptance []AcceptanceOutcome
 }
 
-// FailureSummary 返回第一个失败命令的摘要，供修复轮次使用。
+// AcceptanceOutcome 是一条验收标准的机器校验结果。
+type AcceptanceOutcome struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Target      string `json:"target"`
+	Passed      bool   `json:"passed"`
+	Evidence    string `json:"evidence"`
+}
+
+// FailureSummary 返回第一个失败的验收标准或验证命令的摘要，供修复轮次使用。
 func (r Report) FailureSummary() string {
+	for _, a := range r.Acceptance {
+		if !a.Passed {
+			return fmt.Sprintf("验收标准 `%s` 未满足（%s）。证据:\n%s", a.ID, a.Description, a.Evidence)
+		}
+	}
 	for _, o := range r.Outcomes {
 		if o.ExitCode != 0 {
 			return fmt.Sprintf("命令 `%s` (%s) 失败，退出码 %d。输出末尾:\n%s", o.Command, o.Name, o.ExitCode, o.Tail)
@@ -49,7 +65,14 @@ func (r Report) ToMap() map[string]any {
 			"duration_s": fmt.Sprintf("%.2f", o.DurationS), "log_path": o.LogPath,
 		})
 	}
-	return map[string]any{"passed": r.Passed, "outcomes": outcomes}
+	acceptance := make([]any, 0, len(r.Acceptance))
+	for _, a := range r.Acceptance {
+		acceptance = append(acceptance, map[string]any{
+			"id": a.ID, "description": a.Description, "target": a.Target,
+			"passed": a.Passed, "evidence": a.Evidence,
+		})
+	}
+	return map[string]any{"passed": r.Passed, "outcomes": outcomes, "acceptance": acceptance}
 }
 
 type Verifier struct {
@@ -60,58 +83,222 @@ type Verifier struct {
 
 // Run 按声明顺序执行验证命令，遇到第一个失败即停止。
 func (v Verifier) Run(cwd string, commands []config.VerifyCommand, attempt int) (Report, error) {
-	if err := os.MkdirAll(v.ArtifactsDir, 0o755); err != nil {
-		return Report{}, err
-	}
-	tail := v.TailChars
-	if tail <= 0 {
-		tail = 3000
-	}
 	report := Report{Passed: true}
 	for _, c := range commands {
-		start := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), v.Timeout)
-		cmd := tools.ShellCommand(ctx, c.Command)
-		cmd.Dir = cwd
-		var buf bytes.Buffer
-		cmd.Stdout = &buf
-		cmd.Stderr = &buf
-		runErr := cmd.Run()
-		code := 0
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			code = 124
-			fmt.Fprintf(&buf, "\n超时（>%s）", v.Timeout)
-		} else if runErr != nil {
-			var exitErr interface{ ExitCode() int }
-			if errors.As(runErr, &exitErr) {
-				code = exitErr.ExitCode()
-			} else {
-				code = 1
-				fmt.Fprintf(&buf, "\n执行失败: %v", runErr)
-			}
-		}
-		cancel()
-
-		output := buf.String()
-		logPath := filepath.Join(v.ArtifactsDir, fmt.Sprintf("verify-%d-%s.log", attempt, c.Name))
-		if err := os.WriteFile(logPath, []byte(output), 0o644); err != nil {
+		o, err := v.runOne(cwd, c.Name, c.Command, attempt, "verify")
+		if err != nil {
 			return Report{}, err
 		}
-		o := Outcome{
-			Name:      c.Name,
-			Command:   c.Command,
-			ExitCode:  code,
-			DurationS: time.Since(start).Seconds(),
-			LogPath:   filepath.ToSlash(logPath),
-			Tail:      lastRunes(output, tail),
-		}
 		report.Outcomes = append(report.Outcomes, o)
-		if code != 0 {
+		if o.ExitCode != 0 {
 			report.Passed = false
 			break
 		}
 	}
 	return report, nil
+}
+
+// RunAll 先按顺序执行验证命令，全部通过后再校验验收标准。
+// 任一验证命令失败时跳过验收标准（依赖的测试环境已经不可信）。
+func (v Verifier) RunAll(
+	cwd string, commands []config.VerifyCommand, acceptance []planning.Acceptance, attempt int,
+) (Report, error) {
+	report, err := v.Run(cwd, commands, attempt)
+	if err != nil {
+		return Report{}, err
+	}
+	if !report.Passed {
+		return report, nil
+	}
+	outcomes, err := v.checkAcceptance(cwd, commands, acceptance, attempt, report.Outcomes)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Acceptance = outcomes
+	for _, a := range outcomes {
+		if !a.Passed {
+			report.Passed = false
+			break
+		}
+	}
+	return report, nil
+}
+
+func (v Verifier) runOne(cwd, name, command string, attempt int, prefix string) (Outcome, error) {
+	if err := os.MkdirAll(v.ArtifactsDir, 0o755); err != nil {
+		return Outcome{}, err
+	}
+	tail := v.TailChars
+	if tail <= 0 {
+		tail = 3000
+	}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), v.Timeout)
+	defer cancel()
+	cmd := tools.ShellCommand(ctx, command)
+	cmd.Dir = cwd
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	runErr := cmd.Run()
+	code := 0
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		code = 124
+		fmt.Fprintf(&buf, "\n超时（>%s）", v.Timeout)
+	} else if runErr != nil {
+		var exitErr interface{ ExitCode() int }
+		if errors.As(runErr, &exitErr) {
+			code = exitErr.ExitCode()
+		} else {
+			code = 1
+			fmt.Fprintf(&buf, "\n执行失败: %v", runErr)
+		}
+	}
+
+	output := buf.String()
+	logPath := filepath.Join(v.ArtifactsDir, fmt.Sprintf("%s-%d-%s.log", prefix, attempt, sanitizeName(name)))
+	if err := os.WriteFile(logPath, []byte(output), 0o644); err != nil {
+		return Outcome{}, err
+	}
+	return Outcome{
+		Name:      name,
+		Command:   command,
+		ExitCode:  code,
+		DurationS: time.Since(start).Seconds(),
+		LogPath:   filepath.ToSlash(logPath),
+		Tail:      lastRunes(output, tail),
+	}, nil
+}
+
+func sanitizeName(name string) string {
+	out := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		}
+		return '-'
+	}, name)
+	if out == "" {
+		return "check"
+	}
+	return out
+}
+
+// checkAcceptance 逐条校验验收标准。模型给出的 selector 会再次做元字符检查（纵深防御）。
+// 与已执行的验证命令完全等价的 command 检查会复用结果，避免重复执行测试。
+func (v Verifier) checkAcceptance(
+	cwd string, commands []config.VerifyCommand, acceptance []planning.Acceptance, attempt int, prior []Outcome,
+) ([]AcceptanceOutcome, error) {
+	byName := make(map[string]string, len(commands))
+	for _, c := range commands {
+		byName[c.Name] = c.Command
+	}
+	executed := make(map[string]Outcome, len(prior))
+	for _, o := range prior {
+		executed[o.Name] = o
+	}
+
+	out := make([]AcceptanceOutcome, 0, len(acceptance))
+	for _, ac := range acceptance {
+		res := AcceptanceOutcome{ID: ac.ID, Description: ac.Description}
+		switch ac.Check.Type {
+		case planning.CheckCommand:
+			cmd, ok := byName[ac.Check.Name]
+			if !ok {
+				res.Evidence = fmt.Sprintf("验证命令 %q 未配置", ac.Check.Name)
+				break
+			}
+			if o, reused := executed[ac.Check.Name]; reused {
+				res.Target = cmd
+				res.Passed = o.ExitCode == 0
+				res.Evidence = fmt.Sprintf("复用验证命令 `%s` 结果：退出码 %d，日志 %s", cmd, o.ExitCode, o.LogPath)
+				break
+			}
+			r, err := v.runAcceptance(cwd, "acceptance-"+ac.ID, cmd, attempt)
+			if err != nil {
+				return nil, err
+			}
+			res.Target = cmd
+			res.Passed = r.Passed
+			res.Evidence = r.Evidence
+		case planning.CheckTest:
+			base, ok := byName[ac.Check.Name]
+			if !ok {
+				res.Evidence = fmt.Sprintf("验证命令 %q 未配置", ac.Check.Name)
+				break
+			}
+			cmd := base
+			if ac.Check.Selector != "" {
+				if unsafeSelector.MatchString(ac.Check.Selector) {
+					res.Evidence = "选择器含禁止字符，已拒绝执行"
+					break
+				}
+				cmd = base + " " + ac.Check.Selector
+			}
+			r, err := v.runAcceptance(cwd, "acceptance-"+ac.ID, cmd, attempt)
+			if err != nil {
+				return nil, err
+			}
+			res.Target = cmd
+			res.Passed = r.Passed
+			res.Evidence = r.Evidence
+		case planning.CheckFileExists:
+			res.Target = ac.Check.Path
+			_, err := os.Stat(filepath.Join(cwd, filepath.FromSlash(ac.Check.Path)))
+			res.Passed = err == nil
+			res.Evidence = fmt.Sprintf("文件 %s 存在=%v", ac.Check.Path, res.Passed)
+		case planning.CheckGrep:
+			res.Target = ac.Check.Path
+			got, detail, err := grepFile(filepath.Join(cwd, filepath.FromSlash(ac.Check.Path)), ac.Check.Pattern)
+			if err != nil {
+				res.Evidence = detail
+				break
+			}
+			want := ac.Check.Expect == "present"
+			res.Passed = got == want
+			res.Evidence = detail
+		default:
+			res.Evidence = "不支持的验收标准类型: " + string(ac.Check.Type)
+		}
+		out = append(out, res)
+	}
+	return out, nil
+}
+
+var unsafeSelector = regexp.MustCompile("[;&|`<>$()\n\r\t]")
+
+// acceptanceRun 是一次验收命令执行的结果。
+type acceptanceRun struct {
+	Passed   bool
+	Evidence string
+}
+
+func (v Verifier) runAcceptance(cwd, name, command string, attempt int) (acceptanceRun, error) {
+	o, err := v.runOne(cwd, name, command, attempt, "acceptance")
+	if err != nil {
+		return acceptanceRun{}, err
+	}
+	return acceptanceRun{
+		Passed:   o.ExitCode == 0,
+		Evidence: fmt.Sprintf("退出码 %d，日志 %s\n%s", o.ExitCode, o.LogPath, o.Tail),
+	}, nil
+}
+
+func grepFile(path, pattern string) (bool, string, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return false, "正则无效: " + err.Error(), err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, "无法读取 " + path + ": " + err.Error(), nil
+	}
+	for i, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		if re.MatchString(line) {
+			return true, fmt.Sprintf("%s:%d: %s", path, i+1, strings.TrimSpace(line)), nil
+		}
+	}
+	return false, "未匹配到 " + pattern, nil
 }
 
 func lastRunes(s string, n int) string {

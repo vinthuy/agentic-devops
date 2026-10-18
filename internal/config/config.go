@@ -47,6 +47,7 @@ func (v *VerifyCommands) UnmarshalYAML(node *yaml.Node) error {
 type RepoConfig struct {
 	LocalPath         string         `yaml:"local_path"`
 	DefaultBranch     string         `yaml:"default_branch"`
+	Remote            string         `yaml:"remote"`
 	VerifyCommands    VerifyCommands `yaml:"verify_commands"`
 	AllowedCommands   []string       `yaml:"allowed_commands"`
 	SensitivePaths    []string       `yaml:"sensitive_paths"`
@@ -70,11 +71,35 @@ type ModelsConfig struct {
 	MaxTokens int    `yaml:"max_tokens"`
 	BaseURL   string `yaml:"base_url"`
 	APIKeyEnv string `yaml:"api_key_env"`
+	// Pricing 按模型名配置每百万 token 单价（美元）。
+	Pricing map[string]PricingConfig `yaml:"pricing"`
+}
+
+// PricingConfig 为每百万 token 的单价（美元）。
+type PricingConfig struct {
+	Input      float64 `yaml:"input"`
+	Output     float64 `yaml:"output"`
+	CacheRead  float64 `yaml:"cache_read"`
+	CacheWrite float64 `yaml:"cache_write"`
 }
 
 type DeliveryConfig struct {
 	Enabled      bool   `yaml:"enabled"`
 	BranchPrefix string `yaml:"branch_prefix"`
+	// DraftPR 为 true 时创建草稿 PR，绝不自动合并。
+	DraftPR bool `yaml:"draft_pr"`
+}
+
+// TriageConfig 控制分级策略。
+type TriageConfig struct {
+	// UseModel 为 true 时在规则分级之外追加一次模型估算，取更保守的结果。
+	UseModel bool `yaml:"use_model"`
+}
+
+// PlanningConfig 控制计划生成方式。
+type PlanningConfig struct {
+	// Mode 为 auto 时使用模型规划（无模型时降级为 static），static 时只用验证命令构造计划。
+	Mode string `yaml:"mode"`
 }
 
 // App 是加载后的全部配置。
@@ -84,6 +109,8 @@ type App struct {
 	Policy         PolicyConfig
 	Models         ModelsConfig
 	Delivery       DeliveryConfig
+	Triage         TriageConfig
+	Planning       PlanningConfig
 	GitAuthorName  string
 	GitAuthorEmail string
 }
@@ -127,7 +154,9 @@ func defaults(home string) *App {
 			BaseURL:   "https://api.deepseek.com/anthropic",
 			APIKeyEnv: "DEEPSEEK_API_KEY",
 		},
-		Delivery:       DeliveryConfig{Enabled: false, BranchPrefix: "agent/"},
+		Delivery:       DeliveryConfig{Enabled: false, BranchPrefix: "agent/", DraftPR: true},
+		Triage:         TriageConfig{UseModel: true},
+		Planning:       PlanningConfig{Mode: "auto"},
 		GitAuthorName:  "agentdev",
 		GitAuthorEmail: "agentdev@localhost",
 	}
@@ -147,6 +176,9 @@ func Load(home string) (*App, error) {
 		if repo.DefaultBranch == "" {
 			repo.DefaultBranch = "main"
 		}
+		if repo.Remote == "" {
+			repo.Remote = "origin"
+		}
 		if repo.BudgetUSD == 0 {
 			repo.BudgetUSD = DefaultBudgetUSD
 		}
@@ -162,22 +194,47 @@ func Load(home string) (*App, error) {
 		return nil, err
 	}
 
-	var top struct {
-		Delivery       *DeliveryConfig `yaml:"delivery"`
-		GitAuthorName  string          `yaml:"git_author_name"`
-		GitAuthorEmail string          `yaml:"git_author_email"`
+	// config.yaml 的分组用指针字段读取，只覆盖显式出现的键，避免未声明的字段被清零。
+	var fileCfg struct {
+		Delivery *struct {
+			Enabled      *bool   `yaml:"enabled"`
+			BranchPrefix *string `yaml:"branch_prefix"`
+			DraftPR      *bool   `yaml:"draft_pr"`
+		} `yaml:"delivery"`
+		Triage *struct {
+			UseModel *bool `yaml:"use_model"`
+		} `yaml:"triage"`
+		Planning *struct {
+			Mode *string `yaml:"mode"`
+		} `yaml:"planning"`
+		GitAuthorName  string `yaml:"git_author_name"`
+		GitAuthorEmail string `yaml:"git_author_email"`
 	}
-	if err := readYAML(filepath.Join(home, "config.yaml"), &top); err != nil {
+	if err := readYAML(filepath.Join(home, "config.yaml"), &fileCfg); err != nil {
 		return nil, err
 	}
-	if top.Delivery != nil {
-		app.Delivery = *top.Delivery
+	if d := fileCfg.Delivery; d != nil {
+		if d.Enabled != nil {
+			app.Delivery.Enabled = *d.Enabled
+		}
+		if d.BranchPrefix != nil {
+			app.Delivery.BranchPrefix = *d.BranchPrefix
+		}
+		if d.DraftPR != nil {
+			app.Delivery.DraftPR = *d.DraftPR
+		}
 	}
-	if top.GitAuthorName != "" {
-		app.GitAuthorName = top.GitAuthorName
+	if t := fileCfg.Triage; t != nil && t.UseModel != nil {
+		app.Triage.UseModel = *t.UseModel
 	}
-	if top.GitAuthorEmail != "" {
-		app.GitAuthorEmail = top.GitAuthorEmail
+	if p := fileCfg.Planning; p != nil && p.Mode != nil {
+		app.Planning.Mode = *p.Mode
+	}
+	if fileCfg.GitAuthorName != "" {
+		app.GitAuthorName = fileCfg.GitAuthorName
+	}
+	if fileCfg.GitAuthorEmail != "" {
+		app.GitAuthorEmail = fileCfg.GitAuthorEmail
 	}
 
 	if err := app.Validate(); err != nil {
@@ -217,13 +274,31 @@ func (a *App) Validate() error {
 	if a.Policy.MaxFixAttempts < 0 {
 		problems = append(problems, "max_fix_attempts 不能为负数")
 	}
+	switch a.Planning.Mode {
+	case "auto", "static":
+	default:
+		problems = append(problems, fmt.Sprintf("planning.mode 只能是 auto 或 static，实际 %q", a.Planning.Mode))
+	}
 	if a.Delivery.Enabled {
-		problems = append(problems, "delivery.enabled=true 尚未实现，请保持为 false")
+		if a.Delivery.BranchPrefix == "" {
+			problems = append(problems, "delivery.branch_prefix 不能为空")
+		}
+		for name, repo := range a.Repos {
+			if repo.Remote == "" {
+				problems = append(problems, fmt.Sprintf("%s: delivery 启用时 remote 不能为空", name))
+			}
+		}
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("配置校验失败:\n- %s", strings.Join(problems, "\n- "))
 	}
 	return nil
+}
+
+// PricingFor 返回当前模型是否配置了单价。未配置时计费无法统计，需要提示用户。
+func (a *App) PricingFor() (PricingConfig, bool) {
+	p, ok := a.Models.Pricing[a.Models.Model]
+	return p, ok
 }
 
 // CheckRepoPaths 返回仓库路径相关的问题，空切片表示通过。

@@ -337,3 +337,44 @@ run --once
 
 1. 本轮使用的 `models.yaml` 默认模型名：先以占位符配置，实际模型在接入真实后端时确认。
 2. `verify_commands` 在 Windows 上的写法（如 `npm test` 需要 `shell=True`）：本轮按 `shell=True` 实现。
+
+---
+
+## 9. M1 实现记录（已落地）
+
+M0 的模块名在文档中写作 `.py`（写于 Python 阶段），Go 版对应关系与 M1 新增内容如下。
+
+### 9.1 新增/改动的包
+
+| 包 | 职责 | 对应 SDD |
+|---|---|---|
+| `internal/llm` | Anthropic Messages 协议客户端（重试、用量解析、原样回传内容块） | §5.3 |
+| `internal/cost` | 单价表与费用换算；`ErrBudgetExceeded` 哨兵错误 | §6 成本表、ADR-13 |
+| `internal/triage` | 规则分级 + 可选模型估算，`Combine` 取更保守结果 | ADR-07 |
+| `internal/planning` | 结构化计划/验收标准类型与 `Validate`；`ModelPlanner`（强制工具调用）与 `StaticPlanner` | ADR-09、ADR-15 |
+| `internal/delivery` | 密钥扫描、推送、草稿 PR（`CodeHost` 接口 + `gh` 实现 + `Fake`） | ADR-06、ADR-08、ADR-14 |
+| `internal/orchestrator` | 改为**状态机驱动器**：按当前状态推进一步，支持中断后恢复 | ADR-16 |
+| `internal/verify` | 新增 `RunAll`：验证命令通过后校验验收标准（`command`/`test`/`file_exists`/`grep`） | FR 验收标准 |
+
+### 9.2 关键行为
+
+- **分级**：`--level` 缺省时先跑规则，`triage.use_model=true` 时再叠加一次模型估算，取更高的一级；L 级直接 `REJECTED`，M 级进 `AWAITING_APPROVAL`。
+- **计划**：模型规划失败（网络/格式/校验）不中断任务，记录 `plan_failed` 后降级为 `StaticPlanner`（以全部验证命令作为验收标准）。
+- **验收标准**：与已执行的验证命令等价的 `command` 检查会复用结果，不重复跑测试；`selector` 会做 shell 元字符检查。
+- **成本与预算**：每轮模型调用后写入 `cost_ledger` 并累加 `spent_usd`；达到 80% 记 `budget_warning`，达到 100% 停止调用并挂起。未配置单价时记 `cost_pricing_missing`。
+- **交付**：`delivery.enabled=true` 时在 `COMMITTING` 阶段先跑密钥扫描，命中即挂起且**不推送**；随后推送分支、`gh pr create --draft`，最后 `DONE`。`gh` 不可用时挂起并提示手工创建 PR。
+- **人工介入**：`task approve / reply / resume / cancel`，`cost` 查看花费明细。`resume` 会重置 `fix_attempts`，否则到过修复上限的任务会立刻再次挂起。
+
+### 9.3 与 SDD 的偏差
+
+| 偏差 | 说明 |
+|---|---|
+| 未实现 `REVIEWING` / `CI_WATCHING` | 属 M2；状态机与转换表已预留 |
+| `PR_OPENED` 为瞬态 | 创建 PR 后立即转 `DONE`，等 CI 通知的能力在 M2 补齐 |
+| 计划概览读的是 `local_path` 当前检出的文件列表，而非 worktree | 规划发生在创建 worktree 之前，避免为“需求不清”的任务留下空 worktree |
+| 密钥扫描基于 diff 的新增行 + 敏感文件名 | 不做熵检测，宁可少量误报交人工复核 |
+
+### 9.4 测试
+
+`go test ./...` 全绿，`go vet` 无告警。M1 新增测试覆盖：费用换算、分级规则与合并、计划校验（含选择器注入与路径越界）、强制工具调用解析、密钥扫描、验收标准求值与复用、预算预警与熔断、推送与草稿 PR、密钥命中阻止推送、`NEEDS_INFO` 澄清闭环、恢复、批量执行与 CLI 新命令。
+

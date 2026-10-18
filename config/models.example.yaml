@@ -6,7 +6,21 @@ base_url: https://api.deepseek.com/anthropic
 api_key_env: DEEPSEEK_API_KEY  # 从该环境变量读取 Key，不写入文件
 model: deepseek-v4-pro         # 编码用；成本优先可改为 deepseek-flash
 max_tokens: 8192
-# 参考单价（USD / 百万 token，输入未命中缓存 / 输出；非高峰 / 高峰）：
-#   deepseek-v4-pro  $0.66 / $1.98  ；  $1.32 / $3.96
-#   deepseek-flash   $0.15 / $0.60  ；  $0.30 / $1.20
-# 高峰时段：01:00-04:00、06:00-10:00 UTC（周一至周五，节假日除外）。
+
+# 单价：USD / 百万 token。用于成本核算与预算熔断（PRD G3）。
+# 未配置单价的模型不会计入花费，report 与 cost 命令会明确提示，避免把“未知”当成“免费”。
+# 下面为参考值（输入未命中缓存 / 输出），上线前请按官方价目表核对并更新。
+pricing:
+  deepseek-v4-pro:
+    input: 0.66
+    output: 1.98
+    cache_read: 0.066
+    cache_write: 0.66
+  deepseek-flash:
+    input: 0.15
+    output: 0.60
+    cache_read: 0.015
+    cache_write: 0.15
+
+# 高峰时段（01:00-04:00、06:00-10:00 UTC，周一至周五，节假日除外）单价约为非高峰的 2 倍。
+# 如需精确核算高峰成本，可在此处按高峰价配置一份单独的模型名，并在需要时切换 model。

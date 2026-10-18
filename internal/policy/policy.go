@@ -150,6 +150,12 @@ func (e *Engine) IsDenied(relPosix string) bool {
 			return true
 		}
 	}
+	// 仓库级敏感路径与全局黑名单同等对待，避免分级之外动到敏感文件。
+	for _, pat := range e.Repo.SensitivePaths {
+		if GlobMatch(relPosix, pat) {
+			return true
+		}
+	}
 	return false
 }
 
