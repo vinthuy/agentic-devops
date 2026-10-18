@@ -3,8 +3,9 @@
 需求到 PR 的自动化工程流水线。设计文档见 `docs/`：
 
 - `docs/PRD.md`：产品需求
-- `docs/SDD.md`：系统设计（技术选型见第 3 节，决策见第 17 节）
+- `docs/SDD.md`：系统设计（技术选型见第 3 节，决策见第 17 节，验收矩阵见第 21 节）
 - `docs/IMPLEMENTATION_PLAN.md`：实施方案
+- `docs/HANDOVER.md`：已验证 / 未验证边界与版本基线（先读这个）
 
 ## 技术栈
 
