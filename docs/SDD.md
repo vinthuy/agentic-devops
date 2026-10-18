@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 |---|---|
-| 文档版本 | v0.1（草案） |
-| 状态 | 待评审 |
+| 文档版本 | v0.3（当前实现基线） |
+| 状态 | 与 Go 代码对齐；Docker 为可选后端，不阻塞本地执行 |
 | 关联文档 | `docs/PRD.md`（需求依据，本文引用其 FR/US 编号） |
 | 日期 | 2026-10-18 |
 
@@ -33,69 +33,43 @@
 ## 2. 总体架构
 
 ```
-                        ┌───────────────────────────────────────────┐
-  用户 ──CLI──▶         │               agentdev (CLI)              │
-                        └──────────────────┬────────────────────────┘
-                                           │ 调用服务层
-                        ┌──────────────────▼────────────────────────┐
-                        │            TaskService（应用层）            │
-                        │  create / approve / reply / cancel / resume│
-                        └──────────────────┬────────────────────────┘
-                                           │ 入队 / 查询
-                  ┌────────────────────────▼──────────────────────────┐
-                  │                 Orchestrator                      │
-                  │   状态机引擎 · 调度循环 · 超时/重试/熔断            │
-                  └──┬──────────┬──────────┬──────────┬───────────┬───┘
-                     │          │          │          │           │
-             ┌───────▼──┐ ┌─────▼────┐ ┌───▼─────┐ ┌──▼──────┐ ┌──▼─────────┐
-             │ Triage   │ │ Planner  │ │ Coder / │ │ Verifier│ │ Delivery   │
-             │ 分级引擎  │ │          │ │ Reviewer│ │         │ │ commit/push│
-             └──────────┘ └────┬─────┘ └────┬────┘ └────┬────┘ │ PR / CI    │
-                               │            │           │      └─────┬──────┘
-                        ┌──────▼────────────▼───────────┘            │
-                        │      ExecutionBackend（接口）               │
-                        │  ┌──────────────┐  ┌──────────────────┐    │
-                        │  │ AnthropicAPI │  │ (future) Claude  │    │
-                        │  │ Backend      │  │ Code / Codex     │    │
-                        │  └──────┬───────┘  └──────────────────┘    │
-                        └─────────┼──────────────────────────────────┘
-                                  │ 工具调用
-                        ┌─────────▼──────────────────────────────────┐
-                        │ ToolRuntime                                 │
-                        │ read_file · write_file · edit · search      │
-                        │ run_command（经 PolicyEngine 检查）          │
-                        └─────────┬──────────────────────────────────┘
-                                  │
-                ┌─────────────────┼──────────────────────┐
-                ▼                 ▼                      ▼
-        ┌──────────────┐  ┌───────────────┐   ┌──────────────────┐
-        │ Workspace    │  │ PolicyEngine  │   │ Sandbox          │
-        │ git worktree │  │ 命令/路径/网络 │   │ Process (M1)      │
-        └──────────────┘  └───────────────┘   │ Docker (M2)      │
-                                             └──────────────────┘
+ User ─▶ Cobra CLI ─▶ Orchestrator (persistent state-machine driver)
+                         │
+                         ├── triage ── planning ── coder ── verify
+                         │                           │          │
+                         │                           └─ review ─┘ (enabled + model)
+                         │                                      │
+                         ├── delivery: commit ─ secret scan ─ push ─ EnsurePR
+                         │                                            │
+                         │                               optional CI watcher
+                         │
+                         ├── Store: SQLite (tasks/events/costs/verifications/interactions)
+                         ├── Workspace: git worktree
+                         ├── Policy + ToolRuntime: paths/commands + local process
+                         └── ReportWriter: Markdown + JSONL audit events
 
-        横切组件：Store(SQLite) · EventBus · CostLedger · SecretScanner · Logger · ReportWriter
-        外部接口：GitHubClient（gh CLI / REST）· ModelClient（Anthropic）
+ Model calls: Anthropic Messages HTTP protocol (DeepSeek endpoint first)
+ GitHub calls: gh CLI (auth remains in gh; no token stored by the app)
+ Optional hardening: Docker execution backend; not required for local operation
 ```
 
 ### 2.1 组件清单
 
-| 组件 | 职责 | MVP 形态 |
+| 组件 | 职责 | 当前实现 |
 |---|---|---|
-| `cli` | 命令行入口，解析参数，格式化输出 | Typer（Python） |
-| `TaskService` | 面向 CLI 的应用服务，封装用例 | 普通类 |
-| `Orchestrator` | 状态机引擎，驱动任务推进，处理超时与重试 | 单进程调度循环 |
+| `cli` | 命令行入口，解析参数，格式化输出 | Go Cobra |
+| `Orchestrator` | 状态机引擎，驱动任务推进，处理超时与重试 | 单进程状态循环 |
 | `Triage` | 规则 + 模型的混合分级 | 规则优先，模型补充 |
 | `Planner` | 生成结构化计划与验收标准 | Agent 角色，输出 JSON |
 | `Coder` | 在工作区中实现计划 | Agent 角色，工具循环 |
-| `Reviewer` | 审查 diff | Agent 角色（M2） |
+| `Reviewer` | 审查 diff 与验收证据 | 独立结构化 Agent；默认开启且要求模型可用 |
 | `Verifier` | 执行验证命令并比对验收标准 | 程序化，非 Agent |
 | `Delivery` | commit、push、开 PR、读取 CI | 程序化 |
 | `ExecutionBackend` | Agent 运行时抽象，封装模型调用循环 | 接口 + Anthropic 实现 |
 | `ToolRuntime` | 注册与执行工具，统一经过策略检查 | 内部模块 |
 | `PolicyEngine` | 命令、路径、网络规则判断 | 配置驱动 |
 | `Workspace` | 管理 git worktree 的创建、清理、快照 | 内部模块 |
-| `Sandbox` | 隔离执行命令 | M1: 受限子进程；M2: Docker |
+| 命令执行 | 在 worktree 内执行验证/白名单命令 | 受限本地进程默认；Docker 为可选增强，不是运行前提 |
 | `Store` | 持久化任务、事件、步骤、成本 | SQLite |
 | `CostLedger` | 记录每次模型调用的 Token 与费用 | Store 的一部分 |
 | `SecretScanner` | 扫描 diff 中的疑似密钥 | 正则 + 可选 gitleaks |
@@ -117,10 +91,10 @@
 | 密钥扫描 | 内置正则 + 可选调用 `gitleaks` | 无外部依赖也可工作 |
 | 日志 | 标准库 `log/slog`（JSON Handler） | 结构化、可检索，无第三方依赖 |
 | 测试 | `go test` + `httptest` 模拟模型端点 | 避免测试消耗真实费用；临时 git 仓库做集成测试 |
-| 沙箱（M2） | Docker Desktop（WSL2 后端） | 与 Windows 开发环境兼容 |
+| 执行隔离 | worktree + 路径/命令策略 + 超时的本地子进程 | 本地开发不依赖 Docker；Docker 可作为未来可选后端 |
 
 **平台注意事项（Windows）**：
-- 所有路径在内部统一使用 `pathlib.Path`，存储时使用正斜杠的规范化形式
+- Go 内部使用 `filepath`；跨平台持久化的 worktree 路径统一为正斜杠
 - 子进程调用避免依赖 `bash` 语法，命令配置允许按平台区分（`cmd` / `pwsh` / `sh`）
 - 文件锁与 SQLite 并发：使用 WAL 模式，写操作集中在 Orchestrator
 
@@ -140,11 +114,11 @@
 | `AWAITING_APPROVAL` | 等待用户审批（M 级） | 否（挂起） |
 | `CODING` | Coder 执行修改 | 否 |
 | `VERIFYING` | 运行验证命令 | 否 |
-| `REVIEWING` | Reviewer 审查（M2 起启用，MVP 跳过） | 否 |
+| `REVIEWING` | 独立 Reviewer 审查（启用且模型可用时） | 否 |
 | `COMMITTING` | 本地提交 | 否 |
 | `PUSHED` | 分支已推送 | 否 |
 | `PR_OPENED` | Draft PR 已创建 | 否 |
-| `CI_WATCHING` | 监听 CI 结果（M2 起启用） | 否 |
+| `CI_WATCHING` | 按 `delivery.ci_watch` 轮询 PR 检查 | 否 |
 | `DONE` | 完成 | 是 |
 | `NEEDS_HUMAN` | 需要人工介入（超限、异常、安全拦截） | 否（挂起） |
 | `FAILED` | 不可恢复的错误 | 是 |
@@ -156,23 +130,25 @@
 |---|---|---|---|
 | QUEUED | 调度器拾取 | TRIAGING | 获取仓库锁 |
 | TRIAGING | 分级完成, L | REJECTED | 写入拒绝原因 |
-| TRIAGING | 分级完成, S/M | PLANNING | 创建 worktree |
+| TRIAGING | 分级完成, S/M | PLANNING | 保存分级来源；worktree 在计划就绪后创建 |
 | PLANNING | 计划生成, 需求模糊 | NEEDS_INFO | 保存澄清问题 |
 | PLANNING | 计划生成, M 级 | AWAITING_APPROVAL | 发送审批提示 |
 | PLANNING | 计划生成, S 级 | CODING | — |
-| PLANNING | 计划校验失败（重试后仍失败） | NEEDS_HUMAN | — |
+| PLANNING | 模型规划失败，静态计划有效 | 按需求与级别进入 NEEDS_INFO / AWAITING_APPROVAL / CODING | 记录 `plan_failed`，CLI/报告明确标为静态降级 |
 | NEEDS_INFO | 用户 `reply` | PLANNING | 追加用户回答到上下文 |
 | AWAITING_APPROVAL | 用户 `approve` | CODING | 记录审批人与时间，可附带计划修改 |
 | CODING | 编码完成 | VERIFYING | 生成 diff 快照 |
+| CODING | `request_info(questions)` | NEEDS_INFO | 写入 interactions；先处理澄清控制流，不执行同批次其他写操作 |
 | CODING | 策略拦截 / 工具错误次数超限 | NEEDS_HUMAN | — |
-| VERIFYING | 全部通过 | REVIEWING（M2）或 COMMITTING（MVP） | — |
+| VERIFYING | 全部通过 | REVIEWING（启用且有模型）或 COMMITTING | — |
 | VERIFYING | 失败, 修复次数 < 上限 | CODING | 回传失败摘要 |
 | VERIFYING | 失败, 修复次数 ≥ 上限 | NEEDS_HUMAN | — |
 | REVIEWING | 通过 | COMMITTING | — |
 | REVIEWING | 不通过, `review_attempts` < 上限 | CODING | 回传审查意见并递增审查修复计数 |
 | REVIEWING | 不通过, 已达上限 | NEEDS_HUMAN | 保存最后意见 |
-| COMMITTING | 提交成功 | PUSHED（需先过密钥扫描） | — |
-| COMMITTING | 密钥扫描命中 | NEEDS_HUMAN | 阻止提交 |
+| COMMITTING | 本地模式提交成功 | DONE | `delivery.enabled=false`，不推送 |
+| COMMITTING | 交付模式提交成功且密钥扫描通过 | PUSHED | 扫描在推送前执行；命中时保留本地提交但阻止 push |
+| COMMITTING | 密钥扫描命中 | NEEDS_HUMAN | 阻止推送 |
 | PUSHED | 创建 PR 成功 | PR_OPENED | 记录 PR 号与 URL |
 | PR_OPENED | `ci_watch=false` | DONE | 记录 CI 未监听 |
 | PR_OPENED | `ci_watch=true` | CI_WATCHING | 开始轮询 |
@@ -184,7 +160,7 @@
 | 任意活动状态 | 预算 ≥ 100% | NEEDS_HUMAN | 停止模型调用 |
 | 任意活动状态 | 超时 | NEEDS_HUMAN | — |
 | 任意非终态 | 用户 `cancel` | CANCELLED | 清理 worktree（可选保留分支） |
-| NEEDS_HUMAN | 用户 `resume` | 回到最后一个非挂起状态 | 重置计数（需用户确认） |
+| NEEDS_HUMAN | 用户 `resume` | 回到挂起前状态 | 重置 fix/review/CI 尝试计数 |
 | 任意 | 不可恢复异常 | FAILED | 记录堆栈 |
 
 ### 4.3 状态转换的实现约束
@@ -206,7 +182,7 @@
   1. 规则引擎预判：
      - 关键词命中敏感区域（如 "migration"、"auth"、"workflow"、"依赖升级"）→ 至少 M
      - 需求文本长度与明确性（无法定位文件 → 倾向 M）
-  2. 调用 Planner 的轻量模式，估算：涉及文件数、改动行数、风险标签
+   2. `triage.use_model=true` 时调用独立的结构化模型估算，估算改动规模/风险
   3. 合并结果：取“更保守”的等级（规则优先）
 输出：triage_level ∈ {S, M, L}，附理由与估算
 ```
@@ -215,7 +191,7 @@
 
 ### 5.2 计划（Planning）
 
-Planner 输出符合以下 JSON Schema 的计划（由 Pydantic 校验）：
+Planner 输出符合以下结构的计划（Go `planning.Validate` 在落库前校验）：
 
 ```json
 {
@@ -250,11 +226,11 @@ Planner 输出符合以下 JSON Schema 的计划（由 Pydantic 校验）：
 **关键约束**：
 - `acceptance[].check.type` 只允许：`test`（指定测试选择器）、`command`（引用 `repos.yaml` 中的命令名）、`file_exists`、`grep`（断言某文件包含/不包含某内容）
 - `scope.allowed_paths` 作为硬约束，Coder 写入路径不在其内时，ToolRuntime 直接拒绝
-- 若 `acceptance` 中只有主观描述（无 `check`），计划校验失败，Planner 重试一次，仍失败则 `NEEDS_HUMAN`（对应 FR-011）
+- 每条验收标准必须带受限 `check`；模型规划失败或输出不合法时，记录 `plan_failed` 并回退到由验证命令生成的静态计划。静态计划也会在报告中标为降级，不能伪装成模型规划成功。
 
 ### 5.3 编码（Coding）
 
-**执行后端循环**（`ExecutionBackend.run_step`）：
+**执行后端循环**（Go `backend.ExecutionBackend.RunStep`）：
 
 ```
 构造上下文：系统提示词 + 任务需求 + 计划（当前步骤）+ 失败摘要（如有）+ 工作区文件树
@@ -267,12 +243,10 @@ loop（最多 max_turns 轮）:
             结果截断后追加到 messages
     else:
         break
-返回：StepResult { 修改的文件, 最后的文字说明, 状态 }
+返回：StepResult { 最后文字说明, 工具轮数, 累计用量 }
 ```
 
-**Coder 的步骤拆分**：按计划的 `steps` 顺序逐步执行，每步结束后：
-- 执行 `git add` + `git commit`（FR-024）
-- 在 `events` 中记录该步的 commit SHA，便于恢复时跳过已完成的步骤
+计划步骤为模型提供顺序与目标文件提示；实际工具循环在一个 CODING 状态步骤内完成。提交在验证成功之后执行，不会对每个计划子步骤分别创建 commit。验证后工作区状态和事件持久化，重启后从当前状态继续。
 
 **修复轮次**：VERIFYING 失败后回到 CODING，上下文中仅追加失败摘要与相关文件，不重新发送全部历史，以控制成本。
 
@@ -283,10 +257,10 @@ loop（最多 max_turns 轮）:
 | `read_file` | path, start?, end? | 路径白名单 + 敏感路径黑名单 | 单次返回截断到 N 行 |
 | `write_file` | path, content | `allowed_paths` + 敏感路径 | 整文件写入 |
 | `edit_file` | path, old, new | 同上 | 精确替换，要求 old 唯一 |
-| `search` | pattern, path?, glob? | 仅限工作区 | 基于 ripgrep 或 Python 实现 |
+| `search` | pattern, path? | 仅限工作区 | Go 实现，跳过 `.git` 和常见生成目录 |
 | `list_dir` | path | 仅限工作区 | — |
-| `run_command` | name 或 cmd | 命令白名单 + 参数校验 | 仅允许 `repos.yaml` 中定义的命令名，或策略白名单中的前缀 |
-| `request_info` | question | — | Coder 需要用户补充信息时调用，触发 NEEDS_INFO（M2） |
+| `run_command` | command | 命令白名单 + 黑名单 + shell 元字符拒绝 | 只能使用配置的验证命令或额外允许的命令前缀 |
+| `request_info` | questions: string[] | 控制流工具 | Coder 请求澄清，立即进入 NEEDS_INFO；同批次写工具不会先执行 |
 
 **策略执行顺序**（每次工具调用）：
 1. 解析路径，规范化（消除 `..`，解析符号链接）
@@ -299,10 +273,10 @@ loop（最多 max_turns 轮）:
 ### 5.5 验证（Verifying）
 
 ```
-for cmd in repos[repo].verify_commands:   # 如 lint, typecheck, test, build
-    result = Sandbox.run(cmd, timeout=cmd.timeout)
+for cmd in repos[repo].verify_commands:   # 按配置顺序执行
+    result = tools.ShellCommand(cmd, cwd=worktree, timeout=command_timeout)
     记录 stdout/stderr（截断保存全文到文件）
-    if result.exit_code != 0: 标记失败，跳出（或继续收集，取决于配置）
+    记录退出码；后续验收 check 复用等价命令结果
 
 for ac in plan.acceptance:
     按 check.type 执行对应检查
@@ -312,9 +286,9 @@ for ac in plan.acceptance:
     { command_results[], acceptance_results[], passed: bool, failure_summary }
 ```
 
-**防作弊检查（FR-035）**：验证前计算 diff，若满足以下任一条件则直接失败并转 NEEDS_HUMAN：
-- 修改了 `repos.yaml` 中 `verify_commands` 引用的配置文件（如 `pytest.ini`、`jest.config.*`、`.eslintrc*`）
-- 新增或修改的测试文件中出现 `skip`、`xfail`、`@pytest.mark.skip`、`it.skip`、`describe.skip` 等关键字，且原本没有
+**防作弊检查（FR-035）**：验证前计算 diff，若满足以下任一条件则转 NEEDS_HUMAN：
+- 修改了 `repos.yaml` 中 `verify_commands` 引用的配置文件（示例：`pytest.ini`、`jest.config.*`、`.eslintrc*`，具体由仓库配置决定）
+- 新增或修改的测试文件中出现 `skip`、`xfail`、`it.skip`、`t.Skip` 等跳过标记，且原本没有（关键字按语言配置）
 - 删除了测试文件，或测试用例数量减少
 
 > 检查结果是“需要人工确认”，不是绝对拒绝，避免误伤合理的重构。
@@ -322,23 +296,24 @@ for ac in plan.acceptance:
 ### 5.6 交付（Delivery）
 
 ```
-1. 密钥扫描：对 staged diff 运行 SecretScanner，命中则 NEEDS_HUMAN
-2. 生成 commit（若尚未提交）
-3. git push origin HEAD:refs/heads/agent/<task-id>-<slug>
-   - 禁止 push 到默认分支（客户端与服务端双重检查：本地检查分支名前缀，远端依赖 Token 权限与分支保护）
-   - 使用 --force-with-lease，且仅限 agent/* 前缀
-4. gh pr create --draft --base <default> --head <branch> --title <...> --body-file <生成的正文>
-   - 若已存在同分支的 PR，则更新而非新建（幂等）
-5. PR 正文由 Jinja2 模板渲染，包含：
-   - 需求原文（以引用块形式呈现，并标注“来源：用户输入/Issue #N”）
-   - 计划摘要与验收结果矩阵
-   - 成本明细与运行报告路径
-   - 任务 ID
+1. `workspace.Commit` 暂存并提交任务 diff；工具生成产物先从暂存区移除但保留在 worktree。
+2. `delivery.enabled=false` 时本地完成并进入 DONE，不访问远端。
+3. 开启交付时扫描提交 diff；命中疑似密钥则 NEEDS_HUMAN 且不 push。
+4. 只 push 当前 `agent/*` 任务分支，不 push 默认分支。
+5. `CodeHost.EnsurePR` 先按 head 查 PR：存在则 `gh pr edit`，不存在才 `gh pr create --draft`（按配置决定 draft）。
+6. PR 正文包含来源/需求、计划与验收、成本、运行报告路径、任务 ID；不会自动合并。
 ```
 
 ### 5.7 CI 监听（M2）
 
-```
+仅在 `config.yaml` 中 `delivery.ci_watch: true` 时启用，默认关闭。PR 创建后从 `PR_OPENED` 进入 `CI_WATCHING`：
+
+1. 用 `gh pr checks <PR号> --json name,state,bucket,link` 查询当前快照；轮询间隔、总超时、CI 修复次数由 `ci_poll_seconds`、`ci_timeout_minutes`、`max_ci_attempts` 控制。
+2. 全部通过 → `DONE`；没有 checks → `DONE` 并明确记录“未运行 CI”，绝不表示成验证通过。
+3. 失败 → 通过 `gh run list/view --log-failed` 取截断并脱敏的失败日志，次数未达上限时回到 `CODING`；修复、验证、Reviewer 通过后推送同一分支，并用 `gh pr edit` 更新已有 PR。
+4. 达到失败上限、查询错误、未知状态持续到超时 → `NEEDS_HUMAN`，保留已创建的 PR。
+
+没有 Docker daemon 不影响 CI 监听或本地验证。CI 用例通过 FakeCI 和可注入 gh Runner 验证；线上 PR/CI 需在配置目标 GitHub 仓库后单独验证。
 
 ### 5.8 独立审查（M2）
 
@@ -355,12 +330,6 @@ for ac in plan.acceptance:
 - 编码器可调用 `request_info(questions)`，程序立即暂停当前步骤、写入 `interactions`，并将任务转 `NEEDS_INFO`。用户通过 `task reply` 回复后回到 `PLANNING`；worktree 不重复创建。
 - `task create --issue N` 通过已认证的 `gh issue view` 读取标题/正文，不评论、不关闭 Issue。正文用 `source=issue, trusted=false` 包裹并在 triage、planner、coder、reviewer 提示词中视为不可信数据。`--issue-repo owner/name` 可覆盖从 git remote 推断出的仓库。
 - `cost report` 汇总所有任务、模型调用、角色/模型花费及高花费任务；缺单价的任务显式 `[WARN]`，不会把 `$0` 显示成“免费”。
-轮询：gh pr checks <PR号> --json ...，间隔 60s，超时 30min
-结果：
-  - 全部通过 → DONE
-  - 失败 → 拉取失败 job 的日志（截断），回到 CODING（次数计入修复上限）
-  - 无 CI 配置 → 直接 DONE（记录“未运行 CI”）
-```
 
 ---
 
@@ -546,57 +515,42 @@ review:
 ```yaml
 deny_paths:
   - ".env*"
+  - "**/.env*"
   - "**/*.pem"
   - "**/*.key"
   - ".git/**"
   - "**/secrets/**"
-
 deny_command_patterns:
   - "rm\\s+-rf"
   - "curl\\s+.*\\|\\s*(sh|bash)"
-  - "git\\s+push"                    # 推送只能由 Delivery 模块执行
-  - "git\\s+config"
+  - "git\\s+(push|config|remote)"    # 推送只能由 Delivery 模块执行
   - "npm\\s+publish"
-
-network:
-  mode: "restricted"                 # restricted | open（MVP 仅记录，不强制）
-  allow_hosts:
-    - "registry.npmjs.org"
-    - "pypi.org"
-    - "api.github.com"
-
-limits:
-  max_concurrent_tasks: 2
-  max_fix_attempts: 3
-  max_review_attempts: 2
-  max_ci_attempts: 2
-  max_turns_per_step: 30
-  tool_output_max_chars: 8000
-  task_timeout_minutes: 45
-
-delivery:
-  default_pr_draft: true
-  branch_prefix: "agent/"
+  - "\\bsudo\\b"
+max_fix_attempts: 3
+max_review_attempts: 2
+max_turns_per_step: 30
+tool_output_max_chars: 8000
+command_timeout_s: 300
+task_timeout_minutes: 45
 ```
 
 ### 7.4 models.yaml 示例
 
 ```yaml
-default_provider: anthropic
-
-providers:
-  anthropic:
-    roles:
-      triage:  { model: "claude-haiku-5-5",  max_tokens: 1024 }
-      planner: { model: "claude-sonnet-4-5", max_tokens: 4096 }
-      coder:   { model: "claude-sonnet-4-5", max_tokens: 8192 }
-      reviewer:{ model: "claude-sonnet-4-5", max_tokens: 4096 }
-    pricing_usd_per_mtok:             # 单价需按官网更新
-      claude-haiku-5-5:  { input: 1.0,  output: 5.0,  cache_read: 0.1, cache_write: 1.25 }
-      claude-sonnet-4-5: { input: 3.0,  output: 15.0, cache_read: 0.3, cache_write: 3.75 }
+provider: anthropic                 # Messages 协议兼容层；首期指向 DeepSeek
+base_url: https://api.deepseek.com/anthropic
+api_key_env: DEEPSEEK_API_KEY
+model: deepseek-v4-pro
+max_tokens: 8192
+pricing:                             # 每百万 token 单价；部署者需核实并维护
+  deepseek-v4-pro:
+    input: 0.66
+    output: 1.98
+    cache_read: 0.066
+    cache_write: 0.66
 ```
 
-> 模型名与单价在实现时以官方文档为准，此处仅示意。`models.yaml` 与代码解耦，便于随时更新。
+模型名、单价与 key 环境变量由 `models.yaml` 控制；缺少单价时调用按 `$0` 记账并显式警告，不能解释成免费。
 
 ---
 
@@ -605,55 +559,65 @@ providers:
 ### 8.1 CLI
 
 ```bash
-agentdev task create --repo acme/web-app --text "修复登录页..." [--issue 123] [--level S|M|L] [--budget 2.0]
+agentdev task create --repo acme/web-app --text "修复登录页..." [--level S|M|L] [--budget 2.0]
 agentdev task create --repo acme/web-app --file ./req.md
+agentdev task create --repo acme/web-app --issue 123 [--issue-repo owner/name]
 agentdev task list [--status NEEDS_HUMAN] [--repo acme/web-app]
 agentdev task status <task-id>
-agentdev task logs <task-id> [--follow] [--step]
 agentdev task reply <task-id> --text "..."
-agentdev task approve <task-id> [--plan-edit ./plan.json]
+agentdev task approve <task-id> [--by NAME]
 agentdev task resume <task-id>
-agentdev task cancel <task-id> [--keep-branch]
-agentdev cost report [--by task|repo|day] [--since 2026-10-01]
-agentdev doctor                         # 检查 git、gh、API Key、Docker、配置合法性
+agentdev task cancel <task-id> [--reason ...]
+agentdev cost <task-id>
+agentdev cost report
+agentdev doctor                         # 检查 git、gh、API Key、配置及数据目录；Docker 不要求
 agentdev config validate
-agentdev run                            # 启动调度循环（前台）
+agentdev run [--task ID] [--max N] [--backend anthropic|fake]
 ```
 
 **输出约定**：
-- 默认人类可读；`--json` 输出机器可读格式
+- 默认输出人类可读摘要；事件与完整报告写入 `AGENTDEV_HOME/runs/<task-id>/`
 - 退出码：0 成功；1 一般错误；2 参数错误；3 任务处于需要人工的状态
 
-### 8.2 内部接口（Python）
+### 8.2 Go 内部接口
 
-```python
-class ExecutionBackend(Protocol):
-    name: str
-    def run_step(self, ctx: StepContext) -> StepResult: ...
-    def estimate(self, req: EstimateRequest) -> Estimate: ...
+```go
+type ExecutionBackend interface {
+    Name() string
+    RunStep(ctx StepContext) (StepResult, error)
+}
 
-class ToolRuntime(Protocol):
-    def schemas(self, role: Role) -> list[ToolSchema]: ...
-    def execute(self, call: ToolCall, ctx: ExecContext) -> ToolResult: ...
+type Planner interface {
+    Plan(ctx context.Context, req Requirement) (Plan, error)
+}
 
-class Sandbox(Protocol):
-    def run(self, cmd: CommandSpec, cwd: Path, timeout: int) -> CommandResult: ...
+type Reviewer interface {
+    Review(ctx context.Context, in Input) (Review, error)
+}
 
-class CodeHost(Protocol):
-    def push_branch(self, repo: RepoRef, branch: str, workdir: Path) -> None: ...
-    def open_draft_pr(self, repo: RepoRef, head: str, title: str, body: str) -> PullRequest: ...
-    def get_checks(self, repo: RepoRef, pr: int) -> list[CheckRun]: ...
+type CodeHost interface {
+    EnsurePR(ctx context.Context, req PRRequest) (PRResult, error)
+}
 
-class Store(Protocol):
-    def transition(self, task_id: str, expected_version: int, to: Status, event: Event) -> Task: ...
-    def append_event(self, task_id: str, event: Event) -> None: ...
-    def record_cost(self, task_id: str, entry: CostEntry) -> None: ...
+type CIWatcher interface {
+    Checks(ctx context.Context, req CIRequest) (CISnapshot, error)
+}
+
+type Repository interface {
+    GetTask(id string) (Task, error)
+    Transition(id string, version int64, to state.Status,
+        payload map[string]any, fields map[string]any) (Task, error)
+    AppendEvent(taskID, eventType string, payload map[string]any) error
+    // + cost, verification, interaction and listing operations
+}
 ```
 
 **关键契约**：
 - `ExecutionBackend` 只负责模型交互循环，不直接执行命令或写文件。所有副作用经过 `ToolRuntime`。
 - `Store.transition` 使用乐观锁，版本不匹配则抛出 `ConcurrentModification`，调度器重新加载任务。
-- `CodeHost` 的实现可替换（`gh` CLI / REST），便于测试时使用 Fake。
+- `CodeHost` 使用幂等 `EnsurePR`，默认 `gh` CLI，可注入 Fake/Runner。
+- `CIWatcher` 只查询当前快照；轮询、超时和状态变更由 Orchestrator 持有。
+- 命令执行目前由 `tools.ShellCommand` 在本机子进程执行，不宣称为 Docker/OS 级安全沙箱。
 
 ---
 
@@ -672,23 +636,24 @@ class Store(Protocol):
 用 XML 风格标签包裹不同来源的内容，降低提示注入的影响范围：
 
 ```xml
-<task_requirement source="user">...</task_requirement>
-<issue_body source="github" trusted="false">...</issue_body>
-<plan>...</plan>
-<tool_output tool="run_command" trusted="false">...</tool_output>
-<failure_summary>...</failure_summary>
+<task_requirement source="user" trusted="true">...</task_requirement>
+<task_requirement source="issue" trusted="false">Issue 标题与正文</task_requirement>
+<plan trusted="true">...</plan>
+<acceptance_results trusted="true">...</acceptance_results>
+<failure_summary trusted="false">验证/Reviewer/CI 失败摘要</failure_summary>
+<tool_result trusted="false">工具返回内容</tool_result>
 ```
 
 ### 9.3 上下文预算
 
 - 工具输出超过 `tool_output_max_chars` 时截断，保留头尾，并注明截断
-- 修复轮次不重放完整历史，只保留：计划、当前 diff 摘要、失败摘要、相关文件片段
-- 每次模型调用前估算 Token，超过模型上下文 70% 时触发压缩（丢弃早期工具输出，保留决策与结论）
+- 每个 Coder 步骤是独立模型循环；验证/Reviewer/CI 修复时通过不可信 `failure_summary` 提供截断摘要，不重放旧工具对话
+- 当前没有通用的 70% 上下文自动压缩器；超长 Reviewer diff 会保留首尾并明确标注中间截断
 
 ### 9.4 提示词版本化
 
-- 提示词文件以 `name.vN.md` 命名，任务记录中保存所用版本号
-- 修改提示词需要通过评测基准集（PRD 第 10 节），成功率不下降才能合入
+- 提示词通过 `go:embed` 编译进二进制，文件以 `name.vN.md` 命名；当前任务记录尚未单独保存 prompt hash/version
+- 修改提示词需跑对应单元/端到端测试；产品基准集成功率尚未形成自动回归门槛
 
 ---
 
@@ -698,12 +663,12 @@ class Store(Protocol):
 
 | 威胁 | 攻击面 | 缓解 |
 |---|---|---|
-| 提示注入（Issue 诱导执行恶意命令） | Issue 正文、代码注释、README | 不信任标记；命令白名单；敏感操作审批；网络出站限制 |
+| 提示注入（Issue 诱导执行恶意命令） | Issue 正文、工具输出、CI 日志 | 不信任标记；命令白名单/黑名单；敏感操作由程序执行；当前不承诺 OS 级网络隔离 |
 | 越权访问敏感文件 | 工具的 read_file | deny_paths；路径规范化防止穿越；符号链接检查 |
 | 密钥泄露 | commit、PR 正文、日志 | 推送前扫描；日志脱敏；密钥不进入上下文 |
 | 绕过验证 | 删除测试、修改配置 | 防作弊检查；验证配置文件保护；Reviewer 独立审查 |
 | 推送到默认分支 | Delivery 模块或 Agent 命令 | 分支前缀强制；`git push` 禁止在命令白名单外；GitHub 分支保护 |
-| Token 泄露 | 配置文件、日志 | 通过 `gh auth` 或环境变量读取，不落盘；日志过滤 Token 模式 |
+| Token 泄露 | 配置文件、日志、模型/CI 输出 | 模型 key 只从环境变量读取；GitHub 凭证由 gh 管理；已知密钥模式在运行事件与 CI/Reviewer 文本中脱敏 |
 | 资源滥用（死循环、高费用） | 模型循环、命令长时间运行 | max_turns、超时、预算熔断 |
 
 ### 10.2 命令执行的分层防护
@@ -712,15 +677,15 @@ class Store(Protocol):
 第 1 层：白名单（只允许已声明的命令前缀）
 第 2 层：黑名单正则（危险模式直接拒绝）
 第 3 层：参数校验（禁止管道到 shell、禁止重定向到系统路径）
-第 4 层：执行隔离（工作目录限定，超时，资源限制；M2 起 Docker 容器，网络受限）
+第 4 层：本地执行边界（worktree 路径限定、命令策略、超时；不是 OS 级沙箱）
 第 5 层：输出过滤（截断、脱敏后才返回给模型）
 ```
 
 ### 10.3 GitHub 凭证
 
 - 优先使用 `gh auth` 的已有登录状态
-- 备选：环境变量 `GITHUB_TOKEN`，权限为 fine-grained token，仅限目标仓库
-- 文档中给出最小权限清单，并在 `agentdev doctor` 中检测 Token 权限是否过大
+- 备选：让 gh CLI 从其认证存储读取凭证；agentdev 不自行保存 GitHub token
+- 当前 doctor 检查 gh 可用性，不探测 fine-grained token 的实际授权范围；部署者应只授权目标仓库所需权限
 
 ### 10.4 审计
 
@@ -794,17 +759,17 @@ class Store(Protocol):
 
 | 层次 | 内容 | 工具 |
 |---|---|---|
-| 单元测试 | 状态机转换规则、策略引擎、分级规则、路径规范化、密钥扫描正则、防作弊检测 | pytest |
-| 组件测试 | Store 的乐观锁与事务、ToolRuntime 的策略执行、Workspace 的 worktree 生命周期 | pytest + 临时 Git 仓库 |
-| 集成测试 | 使用**录制的模型响应**（fixture）跑完整流程：需求 → 计划 → 编码 → 验证 → 交付 | pytest + Fake ExecutionBackend + Fake CodeHost |
-| 安全测试 | 路径穿越、危险命令、推送默认分支、删除测试、提示注入样本 | pytest，参数化用例 |
-| 端到端测试 | 真实模型 + 测试仓库（专用沙盒仓库）跑基准集 | 手动触发或夜间任务，不进入 CI 默认流程 |
-| 故障注入 | 中途杀进程后 resume、模拟 GitHub 429、模拟磁盘满 | pytest + 脚本 |
+| 单元测试 | 状态机转换规则、策略引擎、分级规则、路径规范化、密钥扫描、防作弊、Reviewer/CI 判断 | Go `testing` |
+| 组件测试 | Store 事务/迁移、ToolRuntime 策略、Workspace worktree/产物过滤 | Go tests + 临时 Git 仓库 |
+| 集成测试 | Fake ExecutionBackend 驱动需求→计划→编码→验证→交付；Fake Reviewer/CI；gh Runner 替身 | `go test ./...` |
+| 安全测试 | 路径穿越、危险命令、默认分支保护、提示注入、密钥脱敏、未知 CI 状态 | Go 参数化用例 |
+| 真实端到端 | 真实模型 + 明确授权的测试仓库；验证 Draft PR 与真实 CI | 手动运行；当前真实 DeepSeek 路径已验证，真实 GitHub CI 闭环未验证 |
+| 故障注入 | 模型端点错误、工具失败、审批/澄清恢复、CI 超时/失败、老数据库迁移 | httptest、Fake Runner、临时 SQLite/Git |
 
 **测试替身**：
-- `FakeExecutionBackend`：按预设脚本返回工具调用序列
-- `FakeCodeHost`：内存中模拟分支与 PR
-- `FakeSandbox`：返回预设的命令结果
+- `backend.Fake`：按预设脚本返回工具调用序列
+- `delivery.Fake`：模拟 PR，`delivery.FakeCI`：模拟 CI 快照
+- `delivery.CommandRunner`：替换 gh 子进程，验证 PR/CI 命令和结果解析
 
 **基准集**：`tests/benchmarks/` 下维护 20 个 S 级任务的描述、初始仓库快照与验收标准，用于端到端回归（对应 PRD 第 10 节）。
 
@@ -812,22 +777,24 @@ class Store(Protocol):
 
 ## 14. 部署与运行
 
-### 14.1 本地开发（MVP）
+### 14.1 本地开发
 
-- 安装：`pip install -e .`
-- 前置检查：`agentdev doctor` 检测 Python、Git、gh 登录状态、ANTHROPIC_API_KEY、Docker（可选）
+- 构建：`go build -o agentdev ./cmd/agentdev`
+- 测试：`go test ./...`；静态检查：`go vet ./...`
+- 前置检查：`agentdev doctor` 检测 Git、gh、配置目录与 `models.yaml` 中指定的 API key 环境变量。Docker 不检查也不要求。
 - 运行方式：
-  - 手动模式：`agentdev task create ...` 后，另开终端执行 `agentdev run`
-  - 或直接以 `agentdev run --once` 处理队列
+  - `agentdev task create ...` 创建任务
+  - `agentdev run [--task ID] [--max N]` 推进任务
+  - `agentdev task status ID` 与 `$AGENTDEV_HOME/runs/ID/report.md` 查看结果
 
 ### 14.2 环境变量
 
 | 变量 | 必需 | 说明 |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | 是 | 模型调用 |
-| `GITHUB_TOKEN` | 否 | 若未使用 `gh auth` 则必需 |
+| `DEEPSEEK_API_KEY` | 默认必需 | 默认 `models.yaml` 的 `api_key_env`；可配置为其他环境变量名 |
+| gh 登录凭据 | 推送/PR/Issue/CI 时需要 | 通过 `gh auth login` 管理；程序不保存 token |
 | `AGENTDEV_HOME` | 否 | 数据目录，默认 `~/.agentdev` |
-| `AGENTDEV_LOG_LEVEL` | 否 | 默认 `INFO` |
+| `AGENTDEV_LOG_LEVEL` | 当前未配置 | 日志与报告由运行目录生成 |
 
 ### 14.3 可选 Docker 沙箱（本地开发不要求）
 
@@ -845,75 +812,37 @@ MVP/M2 本地开发默认使用受限子进程与 worktree 隔离。Docker 仅�
 
 ```
 agentic-devops/
-├── pyproject.toml
+├── go.mod
+├── go.sum
 ├── README.md
 ├── docs/
 │   ├── PRD.md
 │   ├── SDD.md
-│   └── PRODUCT_INSIGHTS.md
+│   └── IMPLEMENTATION_PLAN.md
 ├── config/                         # 配置模板（复制到 AGENTDEV_HOME 使用）
 │   ├── config.example.yaml
 │   ├── repos.example.yaml
 │   ├── policy.example.yaml
 │   └── models.example.yaml
-├── prompts/                        # 提示词模板（版本化）
-│   ├── triage.v1.md
-│   ├── planner.v1.md
-│   └── coder.v1.md
-├── src/agentdev/
-│   ├── __init__.py
-│   ├── cli.py
-│   ├── service.py                  # TaskService
-│   ├── orchestrator.py             # 状态机与调度循环
-│   ├── state.py                    # 状态与转换表定义
-│   ├── triage.py
-│   ├── planning.py                 # Planner 逻辑与 Schema
-│   ├── verify/
-│   │   ├── runner.py               # 运行验证命令
-│   │   ├── acceptance.py           # 验收标准检查
-│   │   └── anticheat.py            # 防作弊检查
-│   ├── delivery/
-│   │   ├── commit.py
-│   │   ├── push.py
-│   │   ├── pr.py
-│   │   └── ci.py                   # M2
-│   ├── backends/
-│   │   ├── base.py                 # ExecutionBackend 协议
-│   │   └── anthropic_backend.py
-│   ├── tools/
-│   │   ├── runtime.py              # ToolRuntime
-│   │   ├── fs.py
-│   │   └── shell.py
-│   ├── policy/
-│   │   ├── engine.py
-│   │   ├── paths.py
-│   │   └── commands.py
-│   ├── sandbox/
-│   │   ├── base.py
-│   │   ├── process.py              # M1
-│   │   └── docker.py               # M2
-│   ├── workspace.py                # worktree 管理
-│   ├── github/
-│   │   ├── client.py               # CodeHost 实现（gh CLI）
-│   │   └── templates/pr_body.md.j2
-│   ├── store/
-│   │   ├── db.py
-│   │   ├── migrations/
-│   │   └── repository.py
-│   ├── cost.py
-│   ├── secrets.py                  # SecretScanner
-│   ├── report.py                   # ReportWriter
-│   ├── config.py                   # Pydantic 配置模型
-│   └── logging.py
-├── tests/
-│   ├── unit/
-│   ├── component/
-│   ├── integration/
-│   ├── security/
-│   ├── fixtures/                   # 录制的模型响应
-│   └── benchmarks/                 # 20 个 S 级任务
-└── scripts/
-    └── doctor.py
+├── cmd/agentdev/main.go
+└── internal/
+    ├── backend/             # Anthropic Messages coder loop + Fake
+    ├── cli/                 # Cobra 命令
+    ├── config/              # YAML 配置与校验
+    ├── cost/                # 单价与预算
+    ├── delivery/            # secret scan、push、PR、CI watcher
+    ├── llm/                 # Messages HTTP 客户端
+    ├── orchestrator/        # 持久化状态机推进
+    ├── planning/            # Plan、验收标准、model/static planner
+    ├── policy/              # 路径与命令策略
+    ├── report/              # Markdown/JSONL 运行审计
+    ├── review/               # 独立 Reviewer
+    ├── state/                # 状态与转换表
+    ├── store/                # SQLite 与迁移
+    ├── tools/                # ToolRuntime 与本地命令执行
+    ├── triage/               # 规则/模型分级
+    ├── verify/               # 验证命令与验收检查
+    └── workspace/            # git worktree/diff/commit
 ```
 
 ---
@@ -958,16 +887,18 @@ agentic-devops/
 
 ---
 
-## 18. 未决技术问题
+## 18. 当前限制与待验证项
 
-| # | 问题 | 计划 |
-|---|---|---|
-| T1 | 大型仓库的 worktree 创建耗时与磁盘占用 | M1 中实测；必要时改为 sparse checkout |
-| T2 | 验证命令在 Windows 与 Linux 下的兼容性（如 `npm` 的 `.cmd` 包装） | 在 `Sandbox.process` 中统一用 `shell=True` 并按平台处理路径 |
-| T3 | 模型输出 JSON 不稳定时的解析策略 | 使用 tool use 强制结构化输出，而非自由文本解析 |
-| T4 | 长时间编码任务的上下文膨胀 | 按步骤拆分 + 修复轮次只保留摘要（见 9.3） |
-| T5 | Docker 在 Windows 上的文件 IO 性能 | M2 中评估，必要时把依赖缓存放在 WSL 文件系统内 |
-| T6 | 防作弊规则的误报率 | 基准集中统计，逐步调整关键字规则 |
+| 项 | 当前状态 / 下一步 |
+|---|---|
+| 真实 GitHub CI 首次通过率 | 目标 ≥50% 尚未测量；需要授权目标仓库、真实 Draft PR 与基准任务集 |
+| 真实 push/CI 失败修复 | 代码路径与 Fake/Gh Runner 测试已覆盖；当前开发仓库没有配置 remote，未宣称线上闭环验证 |
+| Docker 容器后端 | 可选增强，不是本地开发或 M2 执行的前置条件；只有需要更强隔离时才排期 |
+| Linux 服务器兼容性 | Go 代码跨平台，但当前主要验证环境是 Windows；Linux 子进程、路径和 gh 行为需 CI 验证 |
+| 预算预测准确度 | 当前已有预算上限与逐调用记账；按历史均值给出任务前成本区间仍未实现 |
+| 防作弊误报率 | 规则有单元/组件覆盖；需用更多真实仓库基准统计误报 |
+
+已解决：Messages 兼容端点不支持强制 `tool_choice` 时自动能力探测、结构化工具调用重提示及显式降级审计（ADR-17/18）；因此不再将“所有模型都支持 forced tool choice”列为开放问题。
 
 ---
 
@@ -986,16 +917,18 @@ stateDiagram-v2
     AWAITING_APPROVAL --> CODING: approve
     CODING --> VERIFYING
     VERIFYING --> CODING: 失败且可修复
-    VERIFYING --> REVIEWING: 通过 (M2)
-    VERIFYING --> COMMITTING: 通过 (MVP)
+    VERIFYING --> REVIEWING: review.enabled 且模型可用
+    VERIFYING --> COMMITTING: Reviewer 关闭或无模型
+    CODING --> NEEDS_INFO: request_info
     REVIEWING --> CODING: 不通过且可修复
     REVIEWING --> COMMITTING: 通过
     COMMITTING --> PUSHED
     PUSHED --> PR_OPENED
-    PR_OPENED --> DONE: 无 CI / 通过
-    PR_OPENED --> CI_WATCHING: M2
+    PR_OPENED --> DONE: ci_watch=false
+    PR_OPENED --> CI_WATCHING: ci_watch=true
     CI_WATCHING --> CODING: CI 失败且可修复
-    CI_WATCHING --> DONE: CI 通过
+    CI_WATCHING --> DONE: CI 通过或无 checks
+    CI_WATCHING --> NEEDS_HUMAN: 超时/查询失败/超限
     CODING --> NEEDS_HUMAN: 超限/拦截
     VERIFYING --> NEEDS_HUMAN: 超限
     COMMITTING --> NEEDS_HUMAN: 密钥命中
