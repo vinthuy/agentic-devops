@@ -1,0 +1,4 @@
+# 模型名与单价需以官方文档为准，此处为占位示例。
+provider: anthropic
+model: claude-sonnet-4-5
+max_tokens: 8192

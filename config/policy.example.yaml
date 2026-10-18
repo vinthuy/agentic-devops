@@ -1,0 +1,21 @@
+# 复制到 AGENTDEV_HOME 下使用。未配置的项使用内置默认值。
+deny_paths:
+  - ".env*"
+  - "**/.env*"
+  - "**/*.pem"
+  - "**/*.key"
+  - ".git/**"
+  - "**/secrets/**"
+
+deny_command_patterns:
+  - "rm\\s+-rf"
+  - "curl\\s+.*\\|\\s*(sh|bash)"
+  - "git\\s+(push|config|remote)"
+  - "npm\\s+publish"
+  - "\\bsudo\\b"
+
+max_fix_attempts: 3
+max_turns_per_step: 30
+tool_output_max_chars: 8000
+command_timeout_s: 300
+task_timeout_minutes: 45

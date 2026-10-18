@@ -1,0 +1,18 @@
+# 复制到 AGENTDEV_HOME（默认 ~/.agentdev）下使用
+repos:
+  acme/web-app:
+    local_path: D:/code/web-app          # 已克隆到本地的仓库，需是 git 仓库
+    default_branch: main
+    verify_commands:                     # 按顺序执行，任一失败即视为未通过
+      lint: "npm run lint"
+      test: "npm test -- --ci"
+    allowed_commands:                    # Agent 可额外执行的命令前缀
+      - "npm run"
+    sensitive_paths:                     # 命中则至少为 M 级（分级规则在后续里程碑启用）
+      - ".github/workflows/**"
+      - "package.json"
+      - "src/auth/**"
+    verify_config_files:                 # 修改这些文件会触发防作弊检查
+      - "jest.config.*"
+      - ".eslintrc*"
+    budget_usd: 2.0
