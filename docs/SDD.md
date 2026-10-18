@@ -1122,7 +1122,7 @@ stateDiagram-v2
 | ~~G-06~~ | ~~审批时不能修改计划~~ | AC-09 | **已关闭**：`task approve --plan <file>`；计划须通过 `planning.Validate`，且 `allowed_paths` 只能收紧（`vettedPlanFile`/`scopeCovered`）；`TestApproveWithEditedPlan`、`TestVettedPlanFileScopeRules` | 已关闭 |
 | G-07 | 没有并发任务上限 | AC-38 | 按 FR-064（P1）增加调度器并发控制 | 低（P1） |
 | G-08 | 真实 CI 首次通过率仍未测量 | 21.6 | **大部分关闭**：20 个 S 级用例、3 个技术栈已建立并可复现运行；支持 `--repeat` 重复采样（见 §22）。剩余：接入真实仓库 CI 才能测 PRD 的 CI 首次通过率 | 高（产品验证） |
-| G-09 | 线上 Draft PR 与 CI 闭环未在真实远端验证（本次仅完成推送与建仓） | AC-02、AC-23、AC-28、REL-09 | 在授权测试仓库上执行一次完整 PR 与 CI 失败修复闭环，记录结果到 §18 | 高（产品验证） |
+| G-09 | 线上 Draft PR 与 CI 闭环未在真实远端验证（本次仅完成推送与建仓） | AC-02、AC-23、AC-28、REL-09 | 剧本与沙箱模板已就绪（§23、`bench/sandbox/`），在授权测试仓库上执行并记录 E2E-1 至 E2E-6 的结果 | 高（产品验证） |
 | ~~G-10~~ | ~~进程崩溃恢复只有计数与状态测试，没有故障注入~~ | AC-37、REL 系列 | **已关闭**：`TestCrashDuringCodingThenResumeCompletes` 真正启动 CLI 子进程，在第 4 次模型调用处阻塞并 kill，再用新进程 resume；断言崩溃后状态仍为 CODING、已写入文件保留、恢复后 DONE 且任务提交恰好 1 个。另有两个状态边界测试覆盖 commit 后崩溃与“无改动仍挂起” | 已关闭 |
 
 > 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试），并新增 AC-07b 覆盖“验收标准本身写错”的归因。基准集已建立并测得 6 个用例 83% 的成功率（见 §22），但样本量未达 20，CI 首次通过率仍未测量，不能据此宣称 M1 退出标准达成。
@@ -1230,9 +1230,87 @@ stateDiagram-v2
 
 修复后 `py-json-default` 由 `NEEDS_HUMAN` 变为 `DONE`。`py-csv-quote` 的归因已修正，但该用例仍需在扩样时复测（同一 fixture 在不同运行中一次通过、一次失败，说明规划质量存在波动）。
 
-### 22.5 扩样与局限
+### 22.5 扩样与局限（沙箱剧本见 §23）
 
 - 已扩到 20 个用例、3 个技术栈（Python 10 / Go 7 / JS 3），达到 PRD 的样本规模；但仍是每个用例 1 次运行，统计上只是单样本。
 - 需要多轮采样时用 `--repeat N`：结果按运行次数统计，并按用例给出「通过/运行」，可区分模型波动与真实能力差异。
 - 基准只覆盖本地验证与审查，不含真实 GitHub 推送与 CI；`ci_watch` 路径仍由 FakeCI 与 Runner 替身覆盖，CI 首次通过率仍未测量。
 - 用例都是单人小改动，未覆盖跨文件重构、依赖升级、性能与并发缺陷。
+
+---
+
+## 23. G-09 真实 PR / CI 闭环验证剧本
+
+本节把「在真实 GitHub 仓库上验证 Draft PR 与红 CI 自动修复」写成可重复执行的步骤。当前**尚未执行**：需要授权的测试仓库与可用的模型余额。
+
+### 23.1 剧本设计
+
+`bench/sandbox/` 是一个最小仓库模板：
+
+| 文件 | 作用 |
+|---|---|
+| `calc.py` | 含明确 bug：`add(a, b)` 返回 `a - b` |
+| `test_core.py` | 本地验证只跑这个文件 |
+| `test_edges.py` | 只在 CI 跑：`add(None, 1)` / `add(True, 1)` 必须抛 `ValueError` |
+| `workflow.template` | 复制为 `.github/workflows/ci.yml` 后提交 |
+
+因此闭环是：本地验证通过 → 推送 → CI 因边界约束失败 → 失败日志回到编码器 → 修复 → 更新同一个 PR → CI 通过。
+
+已在本地确认该模板的失败顺序：修复前 `test_core.py` 失败；改成 `a + b` 后 `test_core.py` 通过、完整套件仍失败（1 failure + 1 error）。
+
+### 23.2 前置条件
+
+1. 一个**专用私有仓库**（避免在公开仓库留下实验性 PR），例如 `vinthuy/agentdev-sandbox`。
+2. 本地已克隆，并配置为 `origin`。
+3. `gh auth status` 正常；推送与读取 checks 都走同一账号。
+4. 模型 key 环境变量可用（`models.yaml` 的 `api_key_env`）。
+5. `delivery.enabled: true`、`delivery.ci_watch: true`、`delivery.draft_pr: true`。
+
+### 23.3 步骤
+
+```bash
+# 1) 准备沙箱仓库
+cp bench/sandbox/calc.py bench/sandbox/test_core.py bench/sandbox/test_edges.py "$SANDBOX"
+cp bench/sandbox/workflow.template "$SANDBOX/.github/workflows/ci.yml"
+cd "$SANDBOX" && git add -A && git commit -m "sandbox: buggy add + CI-only edge checks" && git push
+
+# 2) 配置 Agent（~/.agentdev/repos.yaml）
+#   sandbox/app:
+#     local_path: /path/to/sandbox
+#     default_branch: main
+#     remote: origin
+#     verify_commands:
+#       test: "python -m unittest -q test_core.py"   # 刻意只跑 core
+#     budget_usd: 1.0
+
+# 3) 提交任务并执行（必须显式开启交付）
+agentdev task create --repo sandbox/app --text "修复 calc.py 中的 add：当前返回 a - b，应返回两数之和"
+agentdev run --push
+
+# 4) 观察
+agentdev task logs <task-id>              # 期望出现 ci_failed → fix_requested(source=ci)
+gh pr view <pr-number> --json isDraft,state,url
+gh pr checks <pr-number>
+```
+
+### 23.4 判定标准
+
+| 编号 | 期望 |
+|---|---|
+| E2E-1 | 分支以 `agent/` 开头，只推送到该分支，`main` 未被改动 |
+| E2E-2 | PR 为 Draft，正文含需求、计划来源、验收矩阵、成本与运行报告路径 |
+| E2E-3 | 第一次 CI 失败，产生 `ci_failed` 事件，`fix_requested` 的 `source=ci` 且 `failure` 含 CI 日志 |
+| E2E-4 | 修复后仍使用**同一个 PR**（编号不变，正文更新），没有新建第二个 PR |
+| E2E-5 | 第二次 CI 通过，任务 `DONE`，`ci_attempts=1` |
+| E2E-6 | `gh pr checks` 全绿；若仓库无 workflow，则任务记录 `ci=none` 而不是假通过 |
+
+### 23.5 清理
+
+- 关闭并删除 Draft PR，删除远端 `agent/*` 分支；
+- 删除 `AGENTDEV_HOME/workspaces/sandbox__app`（`task cancel` 已会清理）；
+- 沙箱仓库保留，可重复用于回归。
+
+### 23.6 记录方式
+
+执行后把结果写入 §18 与本节：PR 编号、两次 CI 的运行 ID、`ci_attempts`、花费、以及是否命中 E2E-1 至 E2E-6。CI 首次通过率用「首次 CI 即通过的任务数 / 已开 PR 的任务数」计算，样本应来自 §22 的基准集而不是单个剧本。
+
