@@ -1,4 +1,9 @@
-# 模型名与单价需以官方文档为准，此处为占位示例。
+# 模型 ID 以官方文档为准：https://platform.claude.com/docs/en/models/overview
+# 4.6 世代及之后的 ID 为固定快照（如 claude-sonnet-5-5），不是会自动升级的别名。
 provider: anthropic
-model: claude-sonnet-4-5
+model: claude-sonnet-5-5     # 编码用，性能与速度的平衡
 max_tokens: 8192
+# 参考单价（USD / 百万 token，输入 / 输出）：
+#   claude-opus-5-5    $4 / $20
+#   claude-sonnet-5-5  $2 / $10
+#   claude-haiku-5-5   $0.10 / $0.50 起
