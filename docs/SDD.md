@@ -766,7 +766,7 @@ type Repository interface {
 | 集成测试 | Fake ExecutionBackend 驱动需求→计划→编码→验证→交付；Fake Reviewer/CI；gh Runner 替身 | `go test ./...` |
 | 安全测试 | 路径穿越、危险命令、默认分支保护、提示注入、密钥脱敏、未知 CI 状态 | Go 参数化用例 |
 | 真实端到端 | 真实模型 + 明确授权的测试仓库；验证 Draft PR 与真实 CI | 手动运行；当前真实 DeepSeek 路径已验证，真实 GitHub CI 闭环未验证 |
-| 故障注入 | 模型端点错误、工具失败、审批/澄清恢复、CI 超时/失败、老数据库迁移 | httptest、Fake Runner、临时 SQLite/Git |
+| 故障注入 | 模型端点错误、工具失败、审批/澄清恢复、CI 超时/失败、老数据库迁移、**真实进程 kill 后 resume** | httptest、Fake Runner、临时 SQLite/Git；`crash_test.go` 用脚本化模型服务让子进程卡在模型调用上再 kill |
 
 **测试替身**：
 - `backend.Fake`：按预设脚本返回工具调用序列
@@ -1058,7 +1058,7 @@ stateDiagram-v2
 | AC-34 | FR-060 | CLI 提供 create / list / status / logs / approve / reply / cancel / resume | `TestTaskListShowsCreated`、`TestTaskLogsShowsTimelineAndJSON`、`TestCancelStopsTaskAndFreesQueue`、`TestResumeFromNeedsHumanContinues` | 已覆盖（`logs` 支持 `--limit`、`--json`） |
 | AC-35 | FR-061 | 状态转换与关键事件入库，非法转换不改变状态 | `TestCreateTaskWritesQueuedAndEvent`、`TestTransitionUpdatesStatusVersionAndFields`、`TestInvalidTransitionRejectedAndStateUnchanged` | 已覆盖 |
 | AC-36 | FR-062 | 运行报告包含时间线、成本、降级、审查、CI 与提交审计 | `TestReportIncludesCostAndPR`、`TestReportRendersSourceAndDegradationProminently`、`TestReportShowsArtifactAuditAndReviewerDecision` | 已覆盖 |
-| AC-37 | FR-063 | 中断后可 resume；恢复时重置修复、审查、CI 计数 | `TestResumeAfterNeedsHuman`、`TestResumeResetsAllM2AttemptCounters` | 已覆盖；真实进程被杀后的恢复待故障注入测试 |
+| AC-37 | FR-063 | 中断后可 resume；恢复时重置修复、审查、CI 计数；进程被杀后不重复提交 | `TestResumeAfterNeedsHuman`、`TestResumeResetsAllM2AttemptCounters`、`TestCrashDuringCodingThenResumeCompletes`、`TestCommitStepRecoversCommitFromCrashedRun` | 已覆盖（含真实子进程 kill 后 resume） |
 | AC-38 | FR-064 | 同时运行的任务数有上限 | — | **未实现**（P1；当前按 `run --max` 顺序执行） |
 | AC-39 | FR-070 | `repos.yaml` 字段、默认值与校验；验证命令顺序保留 | `TestLoadRepoPreservesVerifyOrderAndDefaultsBranch`、`TestValidateRejectsEmptyVerifyAndBadBudget` | 已覆盖 |
 | AC-40 | FR-071 | `policy.yaml` 缺省使用内置默认；语法错误明确报告 | `TestLoadDefaultsWhenFilesMissing`、`TestInvalidYAMLReported` | 已覆盖 |
@@ -1123,7 +1123,7 @@ stateDiagram-v2
 | G-07 | 没有并发任务上限 | AC-38 | 按 FR-064（P1）增加调度器并发控制 | 低（P1） |
 | G-08 | 真实 CI 首次通过率仍未测量 | 21.6 | **大部分关闭**：20 个 S 级用例、3 个技术栈已建立并可复现运行；支持 `--repeat` 重复采样（见 §22）。剩余：接入真实仓库 CI 才能测 PRD 的 CI 首次通过率 | 高（产品验证） |
 | G-09 | 线上 Draft PR 与 CI 闭环未在真实远端验证（本次仅完成推送与建仓） | AC-02、AC-23、AC-28、REL-09 | 在授权测试仓库上执行一次完整 PR 与 CI 失败修复闭环，记录结果到 §18 | 高（产品验证） |
-| G-10 | 进程崩溃恢复只有计数与状态测试，没有故障注入 | AC-37、REL 系列 | 添加“中途杀进程后 resume”的脚本化测试 | 中 |
+| ~~G-10~~ | ~~进程崩溃恢复只有计数与状态测试，没有故障注入~~ | AC-37、REL 系列 | **已关闭**：`TestCrashDuringCodingThenResumeCompletes` 真正启动 CLI 子进程，在第 4 次模型调用处阻塞并 kill，再用新进程 resume；断言崩溃后状态仍为 CODING、已写入文件保留、恢复后 DONE 且任务提交恰好 1 个。另有两个状态边界测试覆盖 commit 后崩溃与“无改动仍挂起” | 已关闭 |
 
 > 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试），并新增 AC-07b 覆盖“验收标准本身写错”的归因。基准集已建立并测得 6 个用例 83% 的成功率（见 §22），但样本量未达 20，CI 首次通过率仍未测量，不能据此宣称 M1 退出标准达成。
 
