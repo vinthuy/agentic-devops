@@ -323,19 +323,24 @@ func summarize(outcomes []Outcome, caseCount int) Summary {
 	if len(outcomes) == 0 {
 		return s
 	}
-	var fixRounds int
+	var (
+		fixRounds     int
+		executedSpend float64
+	)
 	for _, o := range outcomes {
+		// 总花费按实际发生额统计：即使运行被阻断，钱也已经花了。
+		s.TotalCostUSD += o.SpentUSD
 		if o.Blocked {
 			s.Blocked++
 			continue
 		}
+		executedSpend += o.SpentUSD
 		if o.Passed {
 			s.Passed++
 		}
 		if o.Status == string(state.NeedsHuman) || o.Status == "ERROR" {
 			s.HumanRate++
 		}
-		s.TotalCostUSD += o.SpentUSD
 		fixRounds += o.FixAttempts
 	}
 	// 分母只算真正执行过的运行：基础设施阻断不代表产品能力。
@@ -345,7 +350,7 @@ func summarize(outcomes []Outcome, caseCount int) Summary {
 	}
 	s.SuccessRate = float64(s.Passed) / executed
 	s.HumanRate = s.HumanRate / executed
-	s.MeanCostUSD = s.TotalCostUSD / executed
+	s.MeanCostUSD = executedSpend / executed
 	s.MeanFixRounds = float64(fixRounds) / executed
 	return s
 }

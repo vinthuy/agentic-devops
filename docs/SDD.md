@@ -161,7 +161,7 @@
 | CI_WATCHING | 轮询超时/gh 查询失败 | NEEDS_HUMAN | 保留 PR，等待人工 |
 | 任意活动状态 | 预算 ≥ 100% | NEEDS_HUMAN | 停止模型调用 |
 | 任意活动状态 | 超时 | NEEDS_HUMAN | — |
-| 任意非终态 | 用户 `cancel` | CANCELLED | 清理 worktree（可选保留分支） |
+| 任意非终态 | 用户 `cancel` | CANCELLED | 删除 worktree 与 `agent/*` 分支（`--keep-branch` 可保留分支），清理失败只告警不改变终态 |
 | NEEDS_HUMAN | 用户 `resume` | 回到挂起前状态 | 重置 fix/review/CI 尝试计数 |
 | 任意 | 不可恢复异常 | FAILED | 记录堆栈 |
 
@@ -426,7 +426,7 @@ CREATE TABLE interactions (
     content     TEXT NOT NULL
 );
 
--- 调度锁（防止同一仓库并发修改）
+-- 调度锁：为多进程部署预留，当前单进程实现不使用
 CREATE TABLE locks (
     resource    TEXT PRIMARY KEY,    -- repo:owner/name
     task_id     TEXT NOT NULL,
@@ -434,6 +434,9 @@ CREATE TABLE locks (
     heartbeat_at TEXT NOT NULL
 );
 ```
+
+> `locks` 表目前只是预留：单进程内并发由「批量领取 + worktree 操作串行化」保证（ADR-26），
+> 不依赖该表。多进程或多机部署时才需要基于它实现租约与心跳。表中出现残留记录不影响运行。
 
 ### 6.2 数据保留
 
@@ -711,7 +714,7 @@ type Repository interface {
 
 ### 11.2 恢复机制
 
-- 调度器启动时扫描处于活动状态但心跳超时的任务（`locks.heartbeat_at` 超过 5 分钟），标记为 `NEEDS_HUMAN` 并提示 `resume`
+- 多进程部署时，调度器启动时扫描处于活动状态但心跳超时的任务（`locks.heartbeat_at` 超过 5 分钟），标记为 `NEEDS_HUMAN` 并提示 `resume`（当前单进程实现不需要）
 - `resume` 从 `previous_status` 对应的步骤重新执行；对于已完成的副作用（commit、push、PR）通过检查远端状态跳过
 - 步骤级检查点：计划、每个编码步骤的 commit SHA、验证结果均持久化
 
@@ -726,7 +729,7 @@ type Repository interface {
 
 ### 11.4 并发控制
 
-- 同一仓库同一时间只允许一个任务修改 worktree（通过 `locks` 表实现，但 worktree 本身相互隔离，锁主要用于 push 与 PR 创建的串行化）
+- worktree 本身按任务隔离；同一进程内的 worktree 创建/删除已串行化（ADR-26）。`locks` 表仅用于未来多进程部署时的 push/PR 串行化，当前未启用
 - 全局并发数由 `max_concurrent_tasks` 限制
 - 所有写操作通过 Orchestrator 单线程完成，减少 SQLite 写冲突
 
@@ -1016,7 +1019,7 @@ stateDiagram-v2
    go test ./... -count=1     # 全部 ok
    ```
 
-   **当前基线**（2026-10-18）：198 个测试函数，17 个包全部 `ok`，`gofmt` 无输出。
+   **当前基线**（2026-10-18）：224 个测试函数，18 个包全部 `ok`，`gofmt` 无输出。
 
 ### 21.2 功能验收矩阵
 
@@ -1056,7 +1059,7 @@ stateDiagram-v2
 | AC-31 | FR-051 | 任务前给出成本预估 | — | **未实现**（P2） |
 | AC-32 | FR-052 | 80% 记预警，100% 熔断并停止调用模型 | `TestBudgetWarningThenCircuitBreaker`、`TestRepoBudgetDefaultsToTwoDollars`、`TestErrBudgetExceededIsSentinel` | 已覆盖 |
 | AC-33 | FR-053 | 报表按任务、角色、模型汇总 | `TestCostReportAggregatesAcrossTasks` | 部分覆盖：按仓库、按日未实现 |
-| AC-34 | FR-060 | CLI 提供 create / list / status / logs / approve / reply / cancel / resume | `TestTaskListShowsCreated`、`TestTaskLogsShowsTimelineAndJSON`、`TestCancelStopsTaskAndFreesQueue`、`TestResumeFromNeedsHumanContinues` | 已覆盖（`logs` 支持 `--limit`、`--json`） |
+| AC-34 | FR-060 | CLI 提供 create / list / status / logs / approve / reply / cancel / resume；`cancel` 回收 worktree 与分支 | `TestTaskListShowsCreated`、`TestTaskLogsShowsTimelineAndJSON`、`TestCancelStopsTaskAndFreesQueue`、`TestCancelRemovesWorktree`、`TestCancelKeepBranch`、`TestResumeFromNeedsHumanContinues` | 已覆盖（`logs` 支持 `--limit`、`--json`；`cancel` 支持 `--keep-branch`） |
 | AC-35 | FR-061 | 状态转换与关键事件入库，非法转换不改变状态 | `TestCreateTaskWritesQueuedAndEvent`、`TestTransitionUpdatesStatusVersionAndFields`、`TestInvalidTransitionRejectedAndStateUnchanged` | 已覆盖 |
 | AC-36 | FR-062 | 运行报告包含时间线、成本、降级、审查、CI 与提交审计 | `TestReportIncludesCostAndPR`、`TestReportRendersSourceAndDegradationProminently`、`TestReportShowsArtifactAuditAndReviewerDecision` | 已覆盖 |
 | AC-37 | FR-063 | 中断后可 resume；恢复时重置修复、审查、CI 计数；进程被杀后不重复提交 | `TestResumeAfterNeedsHuman`、`TestResumeResetsAllM2AttemptCounters`、`TestCrashDuringCodingThenResumeCompletes`、`TestCommitStepRecoversCommitFromCrashedRun` | 已覆盖（含真实子进程 kill 后 resume） |

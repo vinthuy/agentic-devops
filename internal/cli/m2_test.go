@@ -26,6 +26,108 @@ func (s *stubIssueReader) Read(_ context.Context, repo string, number int64) (gi
 	return s.issue, nil
 }
 
+// 缺模型单价会导致 $0 记账与预算熔断失效，doctor 必须在启动前提示（但不阻断）。
+func TestDoctorWarnsWhenPricingMissing(t *testing.T) {
+	home := writeHome(t, testutil.NewRepo(t))
+	code, out, errOut := invoke(t, "doctor", "--home", home)
+	if code != ExitOK {
+		t.Fatalf("缺单价只是告警，不应失败 (%d): %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "[WARN]") || !strings.Contains(out, "单价") {
+		t.Errorf("应提示缺少模型单价:\n%s", out)
+	}
+
+	models := "provider: anthropic\nbase_url: https://example.invalid\napi_key_env: TEST_KEY\n" +
+		"model: test-model\nmax_tokens: 1024\npricing:\n  test-model:\n    input: 1\n    output: 2\n"
+	if err := os.WriteFile(filepath.Join(home, "models.yaml"), []byte(models), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ = invoke(t, "doctor", "--home", home)
+	if code != ExitOK {
+		t.Fatalf("doctor 失败 (%d): %s", code, out)
+	}
+	if strings.Contains(out, "未配置模型") {
+		t.Errorf("已配置单价时不应再告警:\n%s", out)
+	}
+}
+
+// 取消任务必须回收 worktree，避免目录与 agent 分支无限堆积。
+func TestCancelRemovesWorktree(t *testing.T) {
+	repoPath := testutil.NewRepo(t)
+	home := writeHome(t, repoPath)
+	taskID := createTask(t, home, "--level", "M")
+	script := writeScript(t, home, "good.json", goodStep())
+	// M 级在计划生成后会创建 worktree，然后停在待审批。
+	if code, out, _ := invoke(t, "run", "--backend", "fake", "--script", script, "--task", taskID, "--home", home); code != ExitHuman {
+		t.Fatalf("M 级应等待审批 (%d): %s", code, out)
+	}
+
+	s, err := store.Open(filepath.Join(home, "agentdev.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.GetTask(taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, branch := task.WorktreePath, task.Branch
+	if worktree == "" {
+		t.Fatal("前置条件失败：应已创建 worktree")
+	}
+	if _, err := os.Stat(worktree); err != nil {
+		t.Fatalf("worktree 应存在: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := invoke(t, "task", "cancel", taskID, "--reason", "不再需要", "--home", home)
+	if code != ExitOK {
+		t.Fatalf("取消失败 (%d): %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "已清理") {
+		t.Errorf("应提示已清理: %s", out)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Errorf("worktree 目录应被删除: %v", err)
+	}
+	branches := testutil.Git(t, repoPath, "branch", "--list", branch)
+	if strings.TrimSpace(branches) != "" {
+		t.Errorf("分支应被删除，实际仍存在: %s", branches)
+	}
+}
+
+func TestCancelKeepBranch(t *testing.T) {
+	repoPath := testutil.NewRepo(t)
+	home := writeHome(t, repoPath)
+	taskID := createTask(t, home, "--level", "M")
+	script := writeScript(t, home, "good.json", goodStep())
+	invoke(t, "run", "--backend", "fake", "--script", script, "--task", taskID, "--home", home)
+
+	s, err := store.Open(filepath.Join(home, "agentdev.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.GetTask(taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, branch := task.WorktreePath, task.Branch
+	_ = s.Close()
+
+	code, _, errOut := invoke(t, "task", "cancel", taskID, "--keep-branch", "--home", home)
+	if code != ExitOK {
+		t.Fatalf("取消失败 (%d): %s", code, errOut)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Errorf("worktree 应删除: %v", err)
+	}
+	branches := testutil.Git(t, repoPath, "branch", "--list", branch)
+	if strings.TrimSpace(branches) == "" {
+		t.Error("--keep-branch 时分支应保留")
+	}
+}
+
 // G-07：多个任务可以并发推进，每个任务使用独立 worktree。
 func TestRunParallelProcessesMultipleTasks(t *testing.T) {
 	home := writeHome(t, testutil.NewRepo(t))

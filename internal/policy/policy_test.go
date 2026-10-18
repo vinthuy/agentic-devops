@@ -142,6 +142,48 @@ func TestForbiddenCommands(t *testing.T) {
 	}
 }
 
+// 白名单命令后面追加危险参数，等于绕过白名单执行任意程序。
+func TestAppendedExecutionFlagsRejected(t *testing.T) {
+	e := newEngine(t, nil)
+	for _, cmd := range []string{
+		"go test ./... -exec evil",
+		"go test ./... -exec=evil",
+		"go test ./... -toolexec /tmp/evil",
+		"python -m unittest -q -c code",
+	} {
+		if err := e.CheckCommand(cmd); err == nil {
+			t.Errorf("%q 应当被拒绝", cmd)
+		}
+	}
+	// 普通追加参数仍然允许。
+	for _, cmd := range []string{"go test ./... -run TestX", "go test ./... -count=1"} {
+		if err := e.CheckCommand(cmd); err != nil {
+			t.Errorf("%q 应当允许: %v", cmd, err)
+		}
+	}
+}
+
+// 配置者写的整条命令被视为可信：即使包含 -exec，也属于明确配置。
+func TestExactAllowedCommandIsTrusted(t *testing.T) {
+	root := t.TempDir()
+	repo := config.RepoConfig{
+		LocalPath:      root,
+		VerifyCommands: config.VerifyCommands{{Name: "test", Command: "go test ./... -exec custom-runner"}},
+	}
+	p := config.PolicyConfig{DenyPaths: config.DefaultDenyPaths, DenyCommandPatterns: config.DefaultDenyCommandPatterns}
+	e, err := NewEngine(p, repo, root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.CheckCommand("go test ./... -exec custom-runner"); err != nil {
+		t.Errorf("精确匹配的配置命令应当允许: %v", err)
+	}
+	// 但换成别的程序仍需拒绝。
+	if err := e.CheckCommand("go test ./... -exec evil"); err == nil {
+		t.Error("篡改 -exec 的程序应当被拒绝")
+	}
+}
+
 func TestDeniedCommandExplainsAllowedCommands(t *testing.T) {
 	e := newEngine(t, nil)
 	err := e.CheckCommand("pytest")

@@ -30,6 +30,7 @@ import (
 	"agentdev/internal/state"
 	"agentdev/internal/store"
 	"agentdev/internal/triage"
+	"agentdev/internal/workspace"
 )
 
 const Version = "0.2.0"
@@ -162,43 +163,58 @@ func doctorCmd(opts *options) *cobra.Command {
 			type check struct {
 				ok       bool
 				required bool
-				msg      string
+				// warn 表示“能跑但不理想”：显示 [WARN]，不影响退出码。
+				warn bool
+				msg  string
 			}
 			var checks []check
 			_, gitErr := exec.LookPath("git")
-			checks = append(checks, check{gitErr == nil, true, "git 可用"})
+			checks = append(checks, check{ok: gitErr == nil, required: true, msg: "git 可用"})
 			_, ghErr := exec.LookPath("gh")
-			checks = append(checks, check{ghErr == nil, false, "gh CLI 可用（推送功能需要）"})
+			checks = append(checks, check{ok: ghErr == nil, msg: "gh CLI 可用（推送功能需要）"})
 			keyEnv := cfg.Models.APIKeyEnv
-			checks = append(checks, check{os.Getenv(keyEnv) != "", false, keyEnv + " 已设置（真实模型需要）"})
+			checks = append(checks, check{ok: os.Getenv(keyEnv) != "", msg: keyEnv + " 已设置（真实模型需要）"})
+			if _, priced := cfg.PricingFor(); priced {
+				checks = append(checks, check{ok: true, msg: "模型单价已配置: " + cfg.Models.Model})
+			} else {
+				checks = append(checks, check{
+					warn: true,
+					msg: fmt.Sprintf("models.yaml 未配置模型 %s 的单价：费用会按 $0 记账，预算熔断对该模型不生效",
+						cfg.Models.Model),
+				})
+			}
 
 			if err := os.MkdirAll(cfg.Home, 0o755); err != nil {
-				checks = append(checks, check{false, true, "数据目录不可创建: " + err.Error()})
+				checks = append(checks, check{required: true, msg: "数据目录不可创建: " + err.Error()})
 			} else {
 				probe := filepath.Join(cfg.Home, ".write-probe")
 				if err := os.WriteFile(probe, []byte("ok"), 0o644); err != nil {
-					checks = append(checks, check{false, true, "数据目录不可写: " + err.Error()})
+					checks = append(checks, check{required: true, msg: "数据目录不可写: " + err.Error()})
 				} else {
 					_ = os.Remove(probe)
-					checks = append(checks, check{true, true, "数据目录可写: " + cfg.Home})
+					checks = append(checks, check{ok: true, required: true, msg: "数据目录可写: " + cfg.Home})
 				}
 			}
 
 			if len(cfg.Repos) == 0 {
-				checks = append(checks, check{false, true, "repos.yaml 中没有配置任何仓库"})
+				checks = append(checks, check{required: true, msg: "repos.yaml 中没有配置任何仓库"})
 			}
 			for _, p := range config.CheckRepoPaths(cfg) {
-				checks = append(checks, check{false, true, p})
+				checks = append(checks, check{required: true, msg: p})
 			}
 			for name := range cfg.Repos {
-				checks = append(checks, check{true, true, "仓库已配置: " + name})
+				checks = append(checks, check{ok: true, required: true, msg: "仓库已配置: " + name})
 			}
 
 			failed := false
 			out := cmd.OutOrStdout()
 			for _, c := range checks {
 				mark := "[OK]"
-				if !c.ok {
+				switch {
+				case c.ok:
+				case c.warn:
+					mark = "[WARN]"
+				default:
 					mark = "[FAIL]"
 					if c.required {
 						failed = true
@@ -852,12 +868,13 @@ func taskResumeCmd(opts *options) *cobra.Command {
 
 func taskCancelCmd(opts *options) *cobra.Command {
 	var reason string
+	var keepBranch bool
 	cmd := &cobra.Command{
 		Use:   "cancel <task-id>",
-		Short: "取消任务（终态，不可恢复）",
+		Short: "取消任务（终态，不可恢复）并清理工作区",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, st, task, err := loadTask(cmd, opts)
+			cfg, st, task, err := loadTask(cmd, opts)
 			if err != nil {
 				return err
 			}
@@ -870,11 +887,51 @@ func taskCancelCmd(opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "[OK] 已取消 %s，状态: %s\n", task.ID, updated.Status)
+
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "[OK] 已取消 %s，状态: %s\n", task.ID, updated.Status)
+
+			// 取消后清理 worktree，避免目录与 agent/* 分支无限堆积。
+			// 清理失败不应改变“已取消”这一事实，但要明确告知。
+			if task.WorktreePath == "" {
+				return nil
+			}
+			repoCfg, repoOK := cfg.Repos[task.Repo]
+			if !repoOK || repoCfg.LocalPath == "" {
+				fmt.Fprintf(out, "[WARN] 仓库 %s 未配置，跳过工作区清理: %s\n", task.Repo, task.WorktreePath)
+				return nil
+			}
+			if _, statErr := os.Stat(task.WorktreePath); os.IsNotExist(statErr) {
+				// worktree 已不存在，只需清理残留分支。
+				if keepBranch || task.Branch == "" {
+					fmt.Fprintln(out, "[OK] worktree 已不存在，无需清理")
+					return nil
+				}
+				if _, err := workspace.Git(repoCfg.LocalPath, "branch", "-D", task.Branch); err != nil {
+					fmt.Fprintf(out, "[WARN] worktree 已不存在，删除分支失败: %v\n", err)
+				} else {
+					fmt.Fprintf(out, "[OK] worktree 已不存在，已删除分支 %s\n", task.Branch)
+				}
+				return nil
+			}
+			info := workspace.Info{Path: task.WorktreePath, Branch: task.Branch, BaseSHA: task.BaseSHA}
+			if err := workspace.New(cfg).Remove(repoCfg, info, keepBranch); err != nil {
+				fmt.Fprintf(out, "[WARN] 清理工作区失败: %v\n手动执行: git worktree remove --force %s\n", err, task.WorktreePath)
+				return nil
+			}
+			removed := "worktree 与分支"
+			if keepBranch {
+				removed = "worktree（保留分支）"
+			}
+			fmt.Fprintf(out, "[OK] 已清理 %s\n", removed)
+			_ = st.AppendEvent(task.ID, "worktree_removed", map[string]any{
+				"path": task.WorktreePath, "branch": task.Branch, "keep_branch": keepBranch,
+			})
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "取消原因，写入审计事件")
+	cmd.Flags().BoolVar(&keepBranch, "keep-branch", false, "保留 agent 分支，只删除 worktree")
 	return cmd
 }
 
@@ -1363,10 +1420,13 @@ func benchCmd(opts *options) *cobra.Command {
 			if stats := bench.ByCase(outcomes); len(stats) > 0 && repeat > 1 {
 				fmt.Fprintln(out, "\n按用例统计：")
 				sw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-				fmt.Fprintln(sw, "用例\t通过/运行\t通过率")
+				fmt.Fprintln(sw, "用例\t通过/运行\t通过率\t阻断")
 				for _, st := range stats {
-					fmt.Fprintf(sw, "%s\t%d/%d\t%.0f%%\n", st.ID, st.Passed, st.Runs,
-						float64(st.Passed)/float64(st.Runs)*100)
+					rate := 0.0
+					if st.Runs > 0 {
+						rate = float64(st.Passed) / float64(st.Runs) * 100
+					}
+					fmt.Fprintf(sw, "%s\t%d/%d\t%.0f%%\t%d\n", st.ID, st.Passed, st.Runs, rate, st.Blocked)
 				}
 				if err := sw.Flush(); err != nil {
 					return err

@@ -183,6 +183,31 @@ func (e *Engine) CheckPath(raw string, write bool) (string, error) {
 	return abs, nil
 }
 
+// dangerousArgPatterns 匹配“追在白名单命令后面、但会执行任意程序”的参数。
+//
+// 前缀白名单允许追加参数（例如 `go test ./... -run TestX`），但部分参数本身
+// 就是代码执行入口：`go test -exec`、`-toolexec`，以及解释器的 `-c`。
+// 这些必须拒绝，否则白名单形同虚设。
+var dangerousArgPatterns = []struct {
+	re  *regexp.Regexp
+	msg string
+}{
+	{regexp.MustCompile(`(^|\s)-exec(\s|=|$)`), "-exec 会用任意程序执行测试"},
+	{regexp.MustCompile(`(^|\s)-toolexec(\s|=|$)`), "-toolexec 会替换工具链程序"},
+	{regexp.MustCompile(`(^|\s)--exec(\s|=|$)`), "--exec 会执行任意程序"},
+	{regexp.MustCompile(`(^|\s)-c(\s|$)`), "-c 会直接执行内联代码"},
+}
+
+// checkAppendedArgs 检查追加白名单命令之后的参数。
+func checkAppendedArgs(rest string) error {
+	for _, p := range dangerousArgPatterns {
+		if p.re.MatchString(rest) {
+			return violation("command", "禁止的危险参数 %s（%s）", p.msg, strings.TrimSpace(rest))
+		}
+	}
+	return nil
+}
+
 // CheckCommand 检查命令是否可执行：黑名单、禁止组合命令、白名单前缀。
 func (e *Engine) CheckCommand(cmd string) error {
 	stripped := strings.TrimSpace(cmd)
@@ -203,7 +228,16 @@ func (e *Engine) CheckCommand(cmd string) error {
 	}
 	allowed = append(allowed, e.Repo.AllowedCommands...)
 	for _, a := range allowed {
-		if stripped == a || strings.HasPrefix(stripped, a+" ") {
+		// 精确匹配：整条命令由配置者编写，视为可信。
+		if stripped == a {
+			return nil
+		}
+		// 前缀匹配：只约束“追加的参数”。否则 `go test ./...` 配上
+		// `-exec <程序>` 就能用任意程序跑测试，绕过命令白名单。
+		if strings.HasPrefix(stripped, a+" ") {
+			if err := checkAppendedArgs(strings.TrimPrefix(stripped, a)); err != nil {
+				return err
+			}
 			return nil
 		}
 	}

@@ -132,15 +132,22 @@ func TestRunManifestRepeatsAndAggregatesByCase(t *testing.T) {
 // 基础设施故障（余额不足）不得计入成功率分母。
 func TestSummarizeExcludesBlockedRuns(t *testing.T) {
 	outcomes := []Outcome{
-		{ID: "a", Run: 1, Status: "DONE", Passed: true},
-		{ID: "b", Run: 1, Status: "NEEDS_HUMAN", Blocked: true},
+		{ID: "a", Run: 1, Status: "DONE", Passed: true, SpentUSD: 0.01},
+		{ID: "b", Run: 1, Status: "NEEDS_HUMAN", Blocked: true, SpentUSD: 0.02},
 	}
 	summary := summarize(outcomes, 2)
 	if summary.Trials != 2 || summary.Blocked != 1 || summary.Passed != 1 {
 		t.Fatalf("汇总异常: %+v", summary)
 	}
 	if summary.SuccessRate != 1 {
-		t.Errorf("分母应排除被阻断的运行，成功率={%v}", summary.SuccessRate)
+		t.Errorf("分母应排除被阻断的运行，成功率=%v", summary.SuccessRate)
+	}
+	// 被阻断的运行也花了钱，总花费必须如实反映。
+	if summary.TotalCostUSD != 0.03 {
+		t.Errorf("总花费应包含被阻断运行的实际支出，实际 %v", summary.TotalCostUSD)
+	}
+	if summary.MeanCostUSD != 0.01 {
+		t.Errorf("平均花费应按执行次数计算，实际 %v", summary.MeanCostUSD)
 	}
 	stats := ByCase(outcomes)
 	if len(stats) != 2 || stats[1].Blocked != 1 || stats[1].Runs != 0 {
