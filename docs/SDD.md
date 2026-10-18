@@ -1127,7 +1127,7 @@ stateDiagram-v2
 | ~~G-06~~ | ~~审批时不能修改计划~~ | AC-09 | **已关闭**：`task approve --plan <file>`；计划须通过 `planning.Validate`，且 `allowed_paths` 只能收紧（`vettedPlanFile`/`scopeCovered`）；`TestApproveWithEditedPlan`、`TestVettedPlanFileScopeRules` | 已关闭 |
 | ~~G-07~~ | ~~没有并发任务上限~~ | AC-38 | **已关闭**：`run --parallel M`（上限受 `--max` 约束）；先批量领取任务再分发，`git worktree add/remove` 进程内串行化；每个任务独立后端与输出缓冲；退出码「需要人工」优先 | 已关闭 |
 | G-08 | 真实 CI 首次通过率仍未测量 | 21.6 | **大部分关闭**：20 个 S 级用例、3 个技术栈已建立并可复现运行；支持 `--repeat` 重复采样（见 §22）。剩余：接入真实仓库 CI 才能测 PRD 的 CI 首次通过率 | 高（产品验证） |
-| G-09 | 线上 Draft PR 与 CI 闭环未在真实远端验证（本次仅完成推送与建仓） | AC-02、AC-23、AC-28、REL-09 | 剧本与沙箱模板已就绪（§23、`bench/sandbox/`），在授权测试仓库上执行并记录 E2E-1 至 E2E-6 的结果 | 高（产品验证） |
+| G-09 | 红 CI 自动修复与 CI 首次通过率仍未验证 | AC-28、REL-09 | **部分关闭**：真实 Draft PR 已在 `vinthuy/agentic-devops` 验证（PR #1，E2E-1/2/6 通过，见 §23.7）。E2E-3/4/5 需要仓库具备 CI：先 `gh auth refresh -h github.com -s workflow` 启用 workflow，再复跑 §23.3 | 高（产品验证） |
 | ~~G-10~~ | ~~进程崩溃恢复只有计数与状态测试，没有故障注入~~ | AC-37、REL 系列 | **已关闭**：`TestCrashDuringCodingThenResumeCompletes` 真正启动 CLI 子进程，在第 4 次模型调用处阻塞并 kill，再用新进程 resume；断言崩溃后状态仍为 CODING、已写入文件保留、恢复后 DONE 且任务提交恰好 1 个。另有两个状态边界测试覆盖 commit 后崩溃与“无改动仍挂起” | 已关闭 |
 
 > 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试），并新增 AC-07b 覆盖“验收标准本身写错”的归因。基准集已建立并测得 6 个用例 83% 的成功率（见 §22），但样本量未达 20，CI 首次通过率仍未测量，不能据此宣称 M1 退出标准达成。
@@ -1318,4 +1318,27 @@ gh pr checks <pr-number>
 ### 23.6 记录方式
 
 执行后把结果写入 §18 与本节：PR 编号、两次 CI 的运行 ID、`ci_attempts`、花费、以及是否命中 E2E-1 至 E2E-6。CI 首次通过率用「首次 CI 即通过的任务数 / 已开 PR 的任务数」计算，样本应来自 §22 的基准集而不是单个剧本。
+
+### 23.7 首次真实执行结果
+
+在 `vinthuy/agentic-devops` 上执行了一次真实任务（为该仓库补 `internal/cost` 的缓存计价测试）：
+
+| 项 | 结果 |
+|---|---|
+| 任务 | `t_20261018_4ef952`，真实 DeepSeek，148 秒，$0.0285 |
+| 流程 | TRIAGING → PLANNING → CODING → VERIFYING → REVIEWING(approve) → COMMITTING → PUSHED → PR_OPENED → CI_WATCHING → DONE |
+| PR | https://github.com/vinthuy/agentic-devops/pull/1（`isDraft: true`，base `master`） |
+| 改动 | 仅 `internal/cost/cost_test.go`，新增 `TestTableCostCachePricing` |
+| 独立复核 | 在任务分支上重跑该测试：通过 |
+
+| 编号 | 结论 |
+|---|---|
+| E2E-1 | **通过**：分支 `agent/t_...`，`master` 保持 `5024c39` 未变 |
+| E2E-2 | **通过**：正文含需求、计划来源（模型生成）、允许范围、5 条验收标准与结果矩阵、Reviewer approve、成本、运行报告路径、不自动合并声明 |
+| E2E-3 | **未执行**：仓库没有 workflow（推送 `.github/workflows/*` 需要 `workflow` scope），因此没有红 CI |
+| E2E-4 | **未执行**：复用同一 PR 需要一次 CI 失败后的回修 |
+| E2E-5 | **未执行**：同上 |
+| E2E-6 | **通过**：`gh pr checks` 返回 “no checks reported”，任务记录 `ci: none` 后完成，没有伪装成通过 |
+
+结论：**PR 交付路径已在真实 GitHub 上验证**；**红 CI 自动修复仍未验证**，需要先让仓库具备 CI（`gh auth refresh -h github.com -s workflow` 后启用 `ci/github-workflow.yml.template`），再复跑 §23.3。CI 首次通过率仍无法计算。
 

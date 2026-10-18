@@ -33,15 +33,16 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 | 崩溃恢复 | 真实子进程在模型调用中途被 kill，重启后完成且只产生 1 个提交 |
 | 策略 | 路径穿越、符号链接逃逸、敏感路径、危险命令、`-exec` 类追加参数均被拒绝 |
 | 成本 | 逐次模型调用记账、80% 预警、100% 熔断；缺单价显式告警 |
-| 交付 | 密钥扫描、分支推送、幂等 Draft PR；CI 失败回修路径由 Fake/替身覆盖 |
+| 真实 Draft PR | 在本仓库上跑通：PR #1，仅改目标文件、Draft、正文含验收矩阵与成本、Reviewer approve、`master` 未被改动 |
+| 无 CI 时的处理 | `gh pr checks` 无检查时记录 `ci: none` 后完成，不伪装成通过 |
+| 交付（CI 回修） | 密钥扫描、分支推送、幂等 PR 更新由 Fake/替身覆盖；红 CI 回修尚未在真实仓库验证 |
 
 ## 3. 未验证（重要）
 
 | 项目 | 原因 | 需要什么 |
 |---|---|---|
-| 真实 GitHub Draft PR | 需要一个明确授权的测试仓库 | 私有 sandbox 仓库（见 SDD §23） |
-| 真实 CI 失败→修复闭环 | 同上，且需要仓库内有会先失败的 workflow | 同上 |
-| CI 首次通过率（PRD 目标 ≥50%） | 依赖上面的真实 PR 数据 | 基准集接入真实 CI |
+| 真实 CI 失败→修复闭环 | 仓库尚无 workflow（推送需要 `workflow` scope） | `gh auth refresh -h github.com -s workflow`，启用 `ci/github-workflow.yml.template` 后复跑 §23 |
+| CI 首次通过率（PRD 目标 ≥50%） | 依赖上面的真实 CI 数据 | 基准集接入真实 CI |
 | Linux 兼容性 | 本机 WSL 只有 `docker-desktop` 发行版，没有可用 Linux 环境 | Linux 机器或可用 WSL 发行版 |
 | Docker 隔离 | 你已明确不作为需求；默认使用受限本地进程 | 仅在需要 OS 级隔离时再排期 |
 | 基准统计显著性 | 20 用例 × 少量重复采样 | 更多重复与更多仓库 |
