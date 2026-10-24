@@ -24,6 +24,7 @@ import (
 	"agentdev/internal/config"
 	"agentdev/internal/cost"
 	"agentdev/internal/delivery"
+	"agentdev/internal/forecast"
 	"agentdev/internal/llm"
 	"agentdev/internal/orchestrator"
 	"agentdev/internal/planning"
@@ -34,7 +35,7 @@ import (
 	"agentdev/internal/workspace"
 )
 
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 const (
 	ExitOK    = 0
@@ -952,6 +953,21 @@ func levelLabel(level string) string {
 	return level + " 级"
 }
 
+// validLevel 只接受分级器会产出的级别，避免把任意字符串当成筛选条件。
+func validLevel(level string) bool {
+	switch level {
+	case "S", "M", "L":
+		return true
+	}
+	return false
+}
+
+func writeJSON(out io.Writer, v any) error {
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(v)
+}
+
 func costCmd(opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cost [task-id]",
@@ -965,7 +981,167 @@ func costCmd(opts *options) *cobra.Command {
 		},
 	}
 	cmd.AddCommand(&cobra.Command{Use: "report", Short: "查看所有任务的成本汇总看板", Args: cobra.NoArgs, RunE: costReportRun(opts)})
+	cmd.AddCommand(costForecastCmd(opts))
 	return cmd
+}
+
+// costForecastCmd 用历史实际花费给出一次任务的花费区间。
+//
+// 不给“预计花费”单一数字：花费强偏态，单值会误导。默认报中位数与 P90，
+// 并明确标注用了哪一层历史样本；样本不足时拒绝给数字。
+func costForecastCmd(opts *options) *cobra.Command {
+	var repo, level string
+	var asJSON, accuracy bool
+	cmd := &cobra.Command{
+		Use:   "forecast",
+		Short: "按历史实际花费预测任务花费区间（P50/P90）",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfig(opts)
+			if err != nil {
+				return err
+			}
+			st, err := openStore(cfg)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			samples, err := st.SpendSamples()
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+
+			if accuracy {
+				return costForecastAccuracy(out, st, samples, asJSON)
+			}
+
+			lv := strings.ToUpper(strings.TrimSpace(level))
+			if lv != "" && !validLevel(lv) {
+				return fail(ExitUsage, "未知级别: %s（可用 S/M/L）", level)
+			}
+			fc := make([]forecast.Sample, 0, len(samples))
+			for _, s := range samples {
+				fc = append(fc, forecast.Sample{Repo: s.Repo, Level: s.Level, CostUSD: s.CostUSD})
+			}
+			est, ok := forecast.EstimateFrom(fc, repo, lv)
+			if asJSON {
+				payload := map[string]any{
+					"repo": repo, "level": lv,
+					"available": ok, "samples": len(fc), "minimum_samples": forecast.MinSamples,
+				}
+				if ok {
+					payload["basis"] = est.Basis
+					payload["samples"] = est.Samples
+					payload["p50_usd"] = est.P50
+					payload["p90_usd"] = est.P90
+					payload["min_usd"] = est.Min
+					payload["max_usd"] = est.Max
+				}
+				return writeJSON(out, payload)
+			}
+			if !ok {
+				fmt.Fprintf(out, "[WARN] 样本不足：现有 %d 条已结算任务，至少需要 %d 条才给预测。\n",
+					len(fc), forecast.MinSamples)
+				fmt.Fprintln(out, "       继续运行任务后可用样本会自动累积；不基于个位数样本编造区间。")
+				return nil
+			}
+			fmt.Fprintf(out, "成本预测（样本 %d 条，来自 %s）\n\n", est.Samples, basisLabel(est.Basis))
+			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "中位数 P50\tP90\t最低\t最高")
+			fmt.Fprintf(w, "$%.4f\t$%.4f\t$%.4f\t$%.4f\n", est.P50, est.P90, est.Min, est.Max)
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "\n典型一次约 $%.4f；多数情况下不超过 $%.4f。\n", est.P50, est.P90)
+			if est.Basis != "repo+level" {
+				fmt.Fprintln(out, "[NOTE] 同仓库同级别的样本不足，已放宽筛选条件；越靠后越不可比。")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", "", "按仓库筛选历史样本")
+	cmd.Flags().StringVar(&level, "level", "", "按级别筛选历史样本（S/M/L）")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "以 JSON 输出")
+	cmd.Flags().BoolVar(&accuracy, "accuracy", false, "校准检查：对比已记录预测与任务实际花费")
+	return cmd
+}
+
+func basisLabel(basis string) string {
+	switch basis {
+	case "repo+level":
+		return "同仓库同级别"
+	case "repo":
+		return "同仓库（跨级别）"
+	case "level":
+		return "同级别（跨仓库）"
+	default:
+		return "全部任务"
+	}
+}
+
+// costForecastAccuracy 对比“计划时记录的预测”与“任务实际花费”，
+// 让预测准确度可度量，而不是只声称“已实现”。
+func costForecastAccuracy(out io.Writer, st *store.SQLiteStore, samples []store.SpendSample, asJSON bool) error {
+	type row struct {
+		TaskID  string  `json:"task_id"`
+		P50     float64 `json:"p50_usd"`
+		P90     float64 `json:"p90_usd"`
+		Samples int     `json:"samples"`
+		Basis   string  `json:"basis"`
+		Actual  float64 `json:"actual_usd"`
+		InRange bool    `json:"within_p90"`
+		DeltaTo float64 `json:"delta_to_p50_usd"`
+	}
+	var rows []row
+	within := 0
+	for _, s := range samples {
+		events, err := st.ListEvents(s.TaskID)
+		if err != nil {
+			return err
+		}
+		for _, e := range events {
+			if e.Type != "cost_forecast" {
+				continue
+			}
+			p50, _ := e.Payload["p50_usd"].(float64)
+			p90, _ := e.Payload["p90_usd"].(float64)
+			basis, _ := e.Payload["basis"].(string)
+			n, _ := e.Payload["samples"].(float64)
+			in := s.CostUSD <= p90
+			if in {
+				within++
+			}
+			rows = append(rows, row{
+				TaskID: s.TaskID, P50: p50, P90: p90, Samples: int(n), Basis: basis,
+				Actual: s.CostUSD, InRange: in, DeltaTo: s.CostUSD - p50,
+			})
+			break
+		}
+	}
+	if asJSON {
+		return writeJSON(out, map[string]any{
+			"tasks": len(rows), "within_p90": within, "rows": rows,
+		})
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(out, "尚无“计划时记录了预测”的已结算任务，无法校准。")
+		fmt.Fprintln(out, "跑过新任务（会在计划阶段写入 cost_forecast 事件）后再执行本命令。")
+		return nil
+	}
+	fmt.Fprintf(out, "预测校准：%d 个任务，实际花费落在 P90 内的 %d 个（%d%%）\n\n",
+		len(rows), within, within*100/len(rows))
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "任务\t预测P50\t预测P90\t实际\t结论")
+	for _, r := range rows {
+		verdict := "在 P90 内"
+		if !r.InRange {
+			verdict = "超出 P90"
+		}
+		fmt.Fprintf(w, "%s\t$%.4f\t$%.4f\t$%.4f\t%s\n", r.TaskID, r.P50, r.P90, r.Actual, verdict)
+	}
+	return w.Flush()
 }
 
 func costTaskRun(cmd *cobra.Command, opts *options, taskID string) error {

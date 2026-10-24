@@ -15,6 +15,7 @@ import (
 	"agentdev/internal/config"
 	"agentdev/internal/cost"
 	"agentdev/internal/delivery"
+	"agentdev/internal/forecast"
 	"agentdev/internal/llm"
 	"agentdev/internal/planning"
 	"agentdev/internal/policy"
@@ -342,6 +343,10 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 		ExistingCoverage: coverage,
 		CoverageFiles:    planning.CoverageSnippets(repo.LocalPath, coverage, 2, 4000),
 	}
+
+	// 在开始花钱之前记录预测，任务结束后可用 forecast --accuracy 校准。
+	// 预测是建议性的：失败不影响任务推进，所以这里不返回错误。
+	o.recordCostForecast(task)
 
 	planner := o.planner
 	planSource := "configured_planner"
@@ -1093,6 +1098,50 @@ func (o *Orchestrator) usageHook(taskID, role string) func(llm.Usage) error {
 		}
 		return o.checkBudget(taskID)
 	}
+}
+
+// recordCostForecast 在计划阶段写入花费预测，供任务结束后校准。
+//
+// 只写事件、不阻断流程：预测是建议，缺样本或存储失败都不应让任务停下。
+// 同一次任务只写一次，重规划时不覆盖——否则事后校准会拿最后一次预测对账，
+// 而那次预测已经看到了前一轮的花费。
+func (o *Orchestrator) recordCostForecast(task store.Task) {
+	events, err := o.store.ListEvents(task.ID)
+	if err != nil {
+		return
+	}
+	for _, e := range events {
+		if e.Type == "cost_forecast" {
+			return
+		}
+	}
+	samples, err := o.store.SpendSamples()
+	if err != nil {
+		return
+	}
+	fc := make([]forecast.Sample, 0, len(samples))
+	for _, s := range samples {
+		fc = append(fc, forecast.Sample{Repo: s.Repo, Level: s.Level, CostUSD: s.CostUSD})
+	}
+	est, ok := forecast.EstimateFrom(fc, task.Repo, task.Level)
+	if !ok {
+		// 样本不足时留一条记录，说明“当时没有预测”，
+		// 而不是让事后的人以为漏记了。
+		_ = o.store.AppendEvent(task.ID, "cost_forecast_skipped", map[string]any{
+			"reason":          "历史样本不足",
+			"samples":         len(fc),
+			"minimum_samples": forecast.MinSamples,
+		})
+		return
+	}
+	_ = o.store.AppendEvent(task.ID, "cost_forecast", map[string]any{
+		"basis":   est.Basis,
+		"samples": est.Samples,
+		"p50_usd": est.P50,
+		"p90_usd": est.P90,
+		"min_usd": est.Min,
+		"max_usd": est.Max,
+	})
 }
 
 func (o *Orchestrator) recordUsage(taskID, role, model string, u llm.Usage) error {

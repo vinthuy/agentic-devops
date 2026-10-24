@@ -213,6 +213,7 @@ type Repository interface {
 	RecordCost(taskID, role, model string, entry CostEntry) error
 	ListCosts(taskID string) ([]CostEntry, error)
 	ListAllCosts() ([]CostEntry, error)
+	SpendSamples() ([]SpendSample, error)
 	AddSpend(taskID string, delta float64) error
 	RecordInteraction(taskID, kind, content string) error
 	ListInteractions(taskID string) ([]Interaction, error)
@@ -724,6 +725,54 @@ func (s *SQLiteStore) ListAllCosts() ([]CostEntry, error) {
 			return nil, err
 		}
 		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// SpendSample 是一条历史花费记录，用于成本预测。
+type SpendSample struct {
+	TaskID  string
+	Repo    string
+	Level   string
+	Status  state.Status
+	CostUSD float64
+}
+
+// settledStatuses 是“已经不会再产生花费”的状态。
+// NEEDS_HUMAN 计入：这类任务确实花了钱，且当前不会继续推进；
+// 而 CODING 等中间态的花费只是部分金额，计入会低估。
+var settledStatuses = []state.Status{
+	state.Done, state.Failed, state.Cancelled, state.Rejected, state.NeedsHuman,
+}
+
+// SpendSamples 返回已结算任务的实际花费，用于成本预测。
+// 只取 spent_usd > 0 的任务：0 花费通常是还没调用模型就结束了。
+func (s *SQLiteStore) SpendSamples() ([]SpendSample, error) {
+	if len(settledStatuses) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, 0, len(settledStatuses))
+	args := make([]any, 0, len(settledStatuses))
+	for _, st := range settledStatuses {
+		placeholders = append(placeholders, "?")
+		args = append(args, string(st))
+	}
+	q := `SELECT id, repo, COALESCE(level, ''), status, spent_usd FROM tasks
+		WHERE spent_usd > 0 AND status IN (` + strings.Join(placeholders, ",") + `) ORDER BY rowid`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SpendSample
+	for rows.Next() {
+		var s SpendSample
+		var status string
+		if err := rows.Scan(&s.TaskID, &s.Repo, &s.Level, &status, &s.CostUSD); err != nil {
+			return nil, err
+		}
+		s.Status = state.Status(status)
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }
