@@ -9,7 +9,10 @@
 // 却会让人误以为已经量化过风险。
 package forecast
 
-import "sort"
+import (
+	"math"
+	"sort"
+)
 
 // Sample 是一条历史任务的花费记录。
 type Sample struct {
@@ -79,8 +82,8 @@ func EstimateFrom(samples []Sample, repo, level string) (Estimate, bool) {
 		return Estimate{
 			Samples: len(costs),
 			Basis:   tier.basis,
-			P50:     percentile(costs, 0.50),
-			P90:     percentile(costs, 0.90),
+			P50:     median(costs),
+			P90:     upperQuantile(costs, 0.90),
 			Min:     costs[0],
 			Max:     costs[len(costs)-1],
 		}, true
@@ -89,6 +92,10 @@ func EstimateFrom(samples []Sample, repo, level string) (Estimate, bool) {
 }
 
 // percentile 用线性插值计算分位数；调用方保证 values 已升序且非空。
+//
+// 注释保留以说明历史：v0.5.0 的 P90 用这个规则（numpy/R 默认的 type 7）。
+// 实测 15 个真实任务的 P90 覆盖率只有 73%，低于名义 90%——小样本下线性插值
+// 取的位次偏低，系统性欠覆盖。现在 P90 改用 upperQuantile，见其注释。
 func percentile(values []float64, q float64) float64 {
 	if len(values) == 1 {
 		return values[0]
@@ -106,4 +113,35 @@ func percentile(values []float64, q float64) float64 {
 	}
 	frac := pos - float64(lower)
 	return values[lower] + frac*(values[lower+1]-values[lower])
+}
+
+// median 返回中位数；偶数个取中间两个的平均。调用方保证 values 已升序且非空。
+func median(values []float64) float64 {
+	n := len(values)
+	if n%2 == 1 {
+		return values[n/2]
+	}
+	return (values[n/2-1] + values[n/2]) / 2
+}
+
+// upperQuantile 用 (n+1)p 的顺序统计量估计上分位，缺省回退到最大值。
+//
+// 为什么不用线性插值：第 k 个顺序统计量对一次新观测的期望覆盖率是 k/(n+1)。
+// 插值把结果放在两个顺序统计量之间，实际覆盖率低于名义分位——实测 15 个真实
+// 任务只有 73%。取 ceil((n+1)p) 个值可消除这个向下偏差。
+//
+// 代价是样本少时它会退化成最大值（n=5 时 ceil(0.9×6)=6 > 5，直接取最大值）。
+// 这是应当保留的性质：5 个样本估不出 90 分位，把结果插到最大值以下只是虚假精度。
+// 输出里同时给出 P90 与 Max，读者能看出二者何时相等。
+func upperQuantile(values []float64, q float64) float64 {
+	n := len(values)
+	pos := q * float64(n+1)
+	k := int(math.Ceil(pos - 1e-9))
+	if k >= n {
+		return values[n-1]
+	}
+	if k < 1 {
+		return values[0]
+	}
+	return values[k-1]
 }

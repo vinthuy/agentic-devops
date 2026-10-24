@@ -1,4 +1,4 @@
-# 交接说明（v0.3.0）
+# 交接说明（v0.6.0）
 
 本文件记录当前版本**已验证**与**未验证**的边界，避免把单元测试通过当成线上可用。
 设计依据见 `docs/PRD.md`、`docs/SDD.md`；验收矩阵在 SDD §21。
@@ -17,7 +17,9 @@ agentdev task status <id>
 agentdev task logs <id> [--limit 20] [--json]
 agentdev cost <id>
 agentdev cost report
+agentdev cost forecast [--repo R] [--level S|M|L] [--json] [--accuracy]
 agentdev bench --manifest bench/tasks.yaml --repeat 2
+agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例累积，用于校准预测
 ```
 
 流水线：分级 → 规划 → 编码 → 验证 → 独立审查 → 提交 → 推送 → Draft PR →（可选）CI 监听。
@@ -27,7 +29,7 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 | 项目 | 证据 |
 |---|---|
 | 构建与静态检查 | `gofmt -l .` 无输出；`go build ./...`、`go vet ./...` 通过 |
-| 测试 | 254 个测试函数，19 个包全部通过 |
+| 测试 | 275 个测试函数，21 个包全部通过 |
 | 真实模型端到端 | DeepSeek 完成 邮箱/slug/CSV/字典 等任务，Reviewer 返回 approve |
 | 基准集 | 20 个 S 级用例（Python 10 / Go 7 / JS 3），修复前均确认失败；重复采样 38/40 = 95%，平均 $0.0105/次；ADR-31 回归轮 20/20 = 100%，平均 $0.0095/次（SDD §22.3） |
 | 崩溃恢复 | 真实子进程在模型调用中途被 kill，重启后完成且只产生 1 个提交 |
@@ -41,7 +43,8 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 | CI 首跑发现的问题 | Windows runner 以 CRLF 检出导致 `gofmt -l` 误报全部 40 个 `.go`；加 `.gitattributes`（`* text=auto eol=lf`）后修复（ADR-29） |
 | **CI 首次通过率（PRD ≥50%）** | `bench --ci-repo vinthuy/agentdev-sandbox` 让 20 个基准用例各开一个真实草稿 PR 并等待真实 CI：**20/20 = 100%**，`ci_none=0`，平均 $0.00825/次，总 $0.165（SDD §22.6）。口径：CI 与本地验证跑同一批命令 |
 | **需求前提核查** | 需求声称“某测试缺失/需补充”时，规划前在测试文件里查同名引用，并把命中位置与文件内容注入规划器（ADR-31）。用 PR #1 的原始需求实测：24 秒、$0.0057 停在 `NEEDS_INFO`，明确指出 `cost_test.go:12-14` 已覆盖；无证据注入的版本会产出重复测试（$0.0190） |
-| **花费预测** | `agentdev cost forecast [--repo] [--level]` 按历史实际花费给出 P50/P90（ADR-32）；样本不足 5 条时拒绝给数字。计划阶段写 `cost_forecast` 事件，`--accuracy` 校准。真实库当前只有 1 条已结算任务，实测输出“样本不足”而非编造区间（SDD §5.10） |
+| **花费预测** | `agentdev cost forecast [--repo] [--level]` 按历史实际花费给出 P50/P90（ADR-32）；样本不足 5 条时拒绝给数字。计划阶段写 `cost_forecast` 事件，`--accuracy` 校准（SDD §5.10） |
+| **花费预测的真实校准** | 用 `bench --shared-home` 让基准用例共用数据目录累积样本：20 个真实用例里有 15 个记录了预测，实测 **11/15 = 73% 落在 P90 内**，低于名义 90%。根因是线性插值在小样本下位次偏低（第 k 个顺序统计量的期望覆盖率是 `k/(n+1)`），改用 `ceil((n+1)p)` 后新跑 7 个用例，**6/7 = 86%**；存储的 P90 与新算法精确吻合，确认走的是新代码（SDD §5.10） |
 
 ## 3. 未验证（重要）
 
@@ -49,7 +52,7 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 |---|---|---|
 | 基准统计显著性 | 20 用例 × 1 次运行（成功率与 CI 首次通过率都是单样本） | `--repeat N` 多轮采样，或更多仓库 |
 | 前提核查的覆盖面 | 只覆盖“测试缺失/需补充”这类主张，且依赖关键词触发；非测试类前提（“某函数没处理 X”）仍不核查 | 需要模型驱动的只读检索工具，或更多触发表述 |
-| 花费预测的准确度 | 区间预测已实现，但**真实数据上的命中率未测**：真实库只有 1 条已结算任务，样本不足，预测被正确跳过 | 跑够 5 个以上真实任务后用 `cost forecast --accuracy` 统计“实际落在 P90 内”的比例 |
+| 花费预测的准确度 | 已测出 73%（线性插值）→ 86%（顺序统计量，7 个新样本），**但仍不能说已校准到名义 90%**：7 个点的 95% 置信区间约 42%～99%；且样本等于下限 5 时 P90 必然等于最大值 | 累积到 50 条以上真实样本后重跑 `cost forecast --accuracy` |
 | CI 的额外发现能力 | 基准里 CI 与本地验证跑同一批命令，因此 100% 只说明“环境没有翻车” | 像 `bench/sandbox/` 那样让 CI 跑本地不跑的检查，再统计 |
 | 非 ubuntu 的 Linux 发行版 | 仅覆盖 `ubuntu-latest` | 目标发行版或容器内复跑 |
 | Docker 隔离 | 你已明确不作为需求；默认使用受限本地进程 | 仅在需要 OS 级隔离时再排期 |
@@ -64,7 +67,12 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 
 ## 5. 版本基线
 
-- 代码版本：`v0.5.0`（`internal/cli.Version`）
+- 代码版本：`v0.6.0`（`internal/cli.Version`）
+- `v0.6.0` 相对 `v0.5.0` 的实质变化：
+  - 花费预测的 P90 改用顺序统计量 `ceil((n+1)p)`，替代线性插值：真实校准显示插值版
+    只覆盖 73%（名义 90%），改后新跑 7 个用例覆盖 6 个（ADR-32 修订，§5.10）
+  - `bench --shared-home <dir>`：让基准用例共用一个数据目录，使花费样本跨用例累积，
+    为 `cost forecast --accuracy` 提供真实校准数据；默认仍是用例独立目录
 - `v0.5.0` 相对 `v0.4.0` 的实质变化：
   - 新增花费预测：`agentdev cost forecast [--repo] [--level] [--json] [--accuracy]`，
     报 P50/P90，样本不足 5 条时拒绝给数字；计划阶段记录 `cost_forecast` 事件（ADR-32，§5.10）
@@ -81,7 +89,8 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
   `ci/github-workflow.yml.template` 保留作为分发模板，内容与启用后的文件一致。
 - 推送 `.github/workflows/*` 需要 `gh` 令牌具备 `workflow` scope：
   `gh auth refresh -h github.com -s workflow`。
-- 回退方式：`git checkout v0.5.0`。
+- 回退方式：`git checkout v0.6.0`。
+  **不要回退到 v0.5.0 以下的预测实现**：会丢掉 P90 的顺序统计量修正（预测覆盖率从 80% 掉回 73%）。
   **不要回退到 v0.2.0**：会丢掉 ADR-29（CRLF 检出导致 Windows CI 全红）、ADR-30
   （`ci: none` 抢跑污染 CI 首次通过率）与 `--ci-repo`；若确实要回退，需同时禁用仓库 CI
   的 windows job。

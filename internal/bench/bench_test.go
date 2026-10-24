@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"agentdev/internal/backend"
+	"agentdev/internal/store"
 	"agentdev/internal/testutil"
 )
 
@@ -126,6 +127,65 @@ func TestRunManifestRepeatsAndAggregatesByCase(t *testing.T) {
 	stats := ByCase(outcomes)
 	if len(stats) != 1 || stats[0].Runs != 2 || stats[0].Passed != 2 {
 		t.Errorf("按用例统计异常: %+v", stats)
+	}
+}
+
+// 共用一个数据目录时，后续用例能看到前面用例的花费样本；
+// 反之，独立目录下每个用例都从零开始。
+func TestSharedHomeAccumulatesSpendSamples(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir)
+	manifest := Manifest{Cases: []Case{{
+		ID:          "pass",
+		Fixture:     "fixture",
+		Requirement: "在仓库根目录创建 hello.txt，内容为 hello",
+		Verify:      map[string]string{"check": "go run check.go"},
+		BudgetUSD:   1,
+	}}}
+
+	shared := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RunManifest(context.Background(), dir, manifest, Options{
+		WorkDir:    t.TempDir(),
+		Repeat:     3,
+		SharedHome: shared,
+		BackendFor: fakeWriting("hello\n"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := store.Open(filepath.Join(shared, "agentdev.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tasks, err := s.ListTasks("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("共用数据目录应累积 3 个任务，实际 %d 个", len(tasks))
+	}
+
+	// 对照：不共用时每个用例独立目录，结束后数据目录被清理，不会累积。
+	isolated := filepath.Join(t.TempDir(), "isolated")
+	if _, _, err := RunManifest(context.Background(), dir, manifest, Options{
+		WorkDir:    isolated,
+		Repeat:     2,
+		BackendFor: fakeWriting("hello\n"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(isolated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() == "home" {
+			t.Errorf("未指定 SharedHome 时不应在 workdir 下留下共享数据目录: %s", e.Name())
+		}
 	}
 }
 

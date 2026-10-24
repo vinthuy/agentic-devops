@@ -124,6 +124,10 @@ type Options struct {
 	Repeat int
 	// Keep 为 true 时保留临时目录，便于排查失败用例。
 	Keep bool
+	// SharedHome 让所有用例共用一个数据目录，使历史花费样本跨用例累积。
+	// 为空时每个用例使用独立临时目录：完全隔离，但花费样本不会累积，
+	// 因此 cost_forecast 永远是“样本不足”。
+	SharedHome string
 	// CI 非 nil 时，每个用例都会推送到真实远端并开启 delivery + ci_watch，
 	// 用真实 CI 的结果统计首次通过率。为 nil 时完全离线（旧行为）。
 	CI *CIRemote
@@ -264,7 +268,10 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 		outcome.BaseBranch = base
 	}
 
-	home := filepath.Join(work, "home")
+	home := opts.SharedHome
+	if home == "" {
+		home = filepath.Join(work, "home")
+	}
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		outcome.Err = err.Error()
 		outcome.Status = "ERROR"

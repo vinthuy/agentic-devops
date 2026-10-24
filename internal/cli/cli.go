@@ -35,7 +35,7 @@ import (
 	"agentdev/internal/workspace"
 )
 
-const Version = "0.5.0"
+const Version = "0.6.0"
 
 const (
 	ExitOK    = 0
@@ -1515,6 +1515,7 @@ func benchCmd(opts *options) *cobra.Command {
 		ciPoll       int
 		ciTimeout    int
 		ciWorkflow   string
+		sharedHome   string
 	)
 	cmd := &cobra.Command{
 		Use:   "bench",
@@ -1546,9 +1547,10 @@ func benchCmd(opts *options) *cobra.Command {
 			}
 
 			benchOpts := bench.Options{
-				WorkDir: workDir,
-				Keep:    keep,
-				Repeat:  repeat,
+				WorkDir:    workDir,
+				Keep:       keep,
+				Repeat:     repeat,
+				SharedHome: sharedHome,
 				// 进度写 stderr，stdout 留给表格或 --json，避免机器可读输出被污染。
 				Log: cmd.ErrOrStderr(),
 				BackendFor: func(bench.Case) (backend.ExecutionBackend, error) {
@@ -1695,6 +1697,7 @@ func benchCmd(opts *options) *cobra.Command {
 	f.IntVar(&ciPoll, "ci-poll", 15, "CI 轮询间隔（秒）")
 	f.IntVar(&ciTimeout, "ci-timeout", 10, "单个用例等待 CI 的上限（分钟）")
 	f.StringVar(&ciWorkflow, "ci-workflow", "", "写入基线分支的 CI 定义文件（默认内置通用模板）")
+	f.StringVar(&sharedHome, "shared-home", "", "所有用例共用一个数据目录，使花费样本跨用例累积（用于校准 cost forecast）")
 	return cmd
 }
 

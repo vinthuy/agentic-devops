@@ -50,7 +50,9 @@ func seedSettled(t *testing.T, home, repo, level string, costs []float64) []stri
 	return ids
 }
 
-// 20 个 S 级基准用例的真实花费，升序后的中位数 0.0083、P90 0.01538。
+// 20 个 S 级基准用例的真实花费，升序后的中位数 0.0083。
+// P90 用 (n+1)p 顺序统计量取第 19 个值 0.0170（线性插值会给 0.01538，
+// 但实测覆盖率只有 73%，见 forecast.upperQuantile 的注释）。
 var forecastFixtureCosts = []float64{
 	0.0170, 0.0062, 0.0083, 0.0103, 0.0077, 0.0084, 0.0063, 0.0072, 0.0104, 0.0094,
 	0.0058, 0.0067, 0.0092, 0.0213, 0.0152, 0.0109, 0.0064, 0.0076, 0.0083, 0.0069,
@@ -69,7 +71,7 @@ func TestCostForecastReportsPercentiles(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("退出码 %d，stderr: %s", code, errOut)
 	}
-	for _, want := range []string{"样本 20", "同仓库同级别", "$0.0083", "$0.0154"} {
+	for _, want := range []string{"样本 20", "同仓库同级别", "$0.0083", "$0.0170"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("输出缺少 %q：\n%s", want, out)
 		}
@@ -131,7 +133,7 @@ func TestCostForecastJSON(t *testing.T) {
 	if !payload.Available || payload.Basis != "repo+level" || payload.Samples != 20 {
 		t.Errorf("元信息错误: %+v", payload)
 	}
-	if payload.P50 != 0.0083 || payload.P90 < 0.0153 || payload.P90 > 0.0154 {
+	if payload.P50 != 0.0083 || payload.P90 < 0.0169 || payload.P90 > 0.0171 {
 		t.Errorf("分位数错误: %+v", payload)
 	}
 }

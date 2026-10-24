@@ -29,12 +29,13 @@ func TestEstimateUsesSortedPercentiles(t *testing.T) {
 	if est.Samples != 20 || est.Basis != "repo+level" {
 		t.Fatalf("样本数或来源错误: %+v", est)
 	}
-	// 20 个值升序后：P50 插值在索引 9.5，即第 10、11 个值 (0.0083、0.0083) 的中点。
+	// 20 个值升序后中位数是第 10、11 个 (0.0083、0.0083) 的平均。
 	if !closeEnough(est.P50, 0.0083) {
 		t.Errorf("P50 错误: %v", est.P50)
 	}
-	// P90 在索引 17.1：0.0152 与 0.0170 之间插值。
-	if !closeEnough(est.P90, 0.01538) {
+	// P90 取 ceil(0.9×21)=19 个顺序统计量，即 0.0170。
+	// 线性插值会给出 0.01538，实测覆盖率只有 73%，因此改用顺序统计量。
+	if !closeEnough(est.P90, 0.0170) {
 		t.Errorf("P90 错误: %v", est.P90)
 	}
 	if !closeEnough(est.Min, 0.0058) || !closeEnough(est.Max, 0.0213) {
@@ -136,17 +137,48 @@ func TestEstimateWithoutFiltersUsesAllSamples(t *testing.T) {
 
 func TestPercentileEdges(t *testing.T) {
 	values := []float64{1, 2, 3, 4}
-	if !closeEnough(percentile(values, 0), 1) {
-		t.Error("q=0 应返回最小值")
+	if !closeEnough(median(values), 2.5) {
+		t.Error("偶数个的中位数应为中间两个的平均")
 	}
-	if !closeEnough(percentile(values, 1), 4) {
-		t.Error("q=1 应返回最大值")
+	if !closeEnough(median([]float64{1, 2, 3}), 2) {
+		t.Error("奇数个的中位数应为中间值")
 	}
-	if !closeEnough(percentile(values, 0.5), 2.5) {
-		t.Error("中位数错误")
-	}
-	if !closeEnough(percentile([]float64{7}, 0.9), 7) {
+	if !closeEnough(upperQuantile([]float64{7}, 0.9), 7) {
 		t.Error("单值样本应返回该值")
+	}
+	if !closeEnough(upperQuantile(values, 0.9), 4) {
+		t.Error("小样本上分位应回退到最大值")
+	}
+	// 大样本时上分位不应该是最大值：否则等于把所有异常都当成上限。
+	wide := make([]float64, 20)
+	for i := range wide {
+		wide[i] = float64(i + 1)
+	}
+	if !closeEnough(upperQuantile(wide, 0.9), 19) {
+		t.Errorf("n=20 时 P90 应为第 19 个值，实际 %v", upperQuantile(wide, 0.9))
+	}
+}
+
+// 样本刚好等于下限时，P90 必然等于最大值——5 个点估不出 90 分位，
+// 插值到最大值以下只会制造虚假精度。这个行为要有测试固定住。
+func TestP90EqualsMaxAtMinimumSamples(t *testing.T) {
+	est, ok := EstimateFrom(benchSamples()[:MinSamples], "r", "S")
+	if !ok {
+		t.Fatal("样本刚好达标时应给出估计")
+	}
+	if est.P90 != est.Max {
+		t.Errorf("样本等于下限时 P90 应等于最大值: p90=%v max=%v", est.P90, est.Max)
+	}
+}
+
+// P90 必须随样本增加而收敛到真实上分位，不会因为样本多而虚高。
+func TestP90ShrinksBelowMaxAsSamplesGrow(t *testing.T) {
+	est, ok := EstimateFrom(benchSamples(), "r", "S")
+	if !ok {
+		t.Fatal("应给出估计")
+	}
+	if est.P90 >= est.Max {
+		t.Errorf("20 个样本时 P90(%v) 应低于最大值(%v)", est.P90, est.Max)
 	}
 }
 
