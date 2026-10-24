@@ -29,7 +29,7 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 | 构建与静态检查 | `gofmt -l .` 无输出；`go build ./...`、`go vet ./...` 通过 |
 | 测试 | 231 个测试函数，18 个包全部通过 |
 | 真实模型端到端 | DeepSeek 完成 邮箱/slug/CSV/字典 等任务，Reviewer 返回 approve |
-| 基准集 | 20 个 S 级用例（Python 10 / Go 7 / JS 3），修复前均确认失败；重复采样 38/40 = 95%，平均 $0.0105/次 |
+| 基准集 | 20 个 S 级用例（Python 10 / Go 7 / JS 3），修复前均确认失败；重复采样 38/40 = 95%，平均 $0.0105/次；ADR-31 回归轮 20/20 = 100%，平均 $0.0095/次（SDD §22.3） |
 | 崩溃恢复 | 真实子进程在模型调用中途被 kill，重启后完成且只产生 1 个提交 |
 | 策略 | 路径穿越、符号链接逃逸、敏感路径、危险命令、`-exec` 类追加参数均被拒绝 |
 | 成本 | 逐次模型调用记账、80% 预警、100% 熔断；缺单价显式告警 |
@@ -62,7 +62,11 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 
 ## 5. 版本基线
 
-- 代码版本：`v0.3.0`（`internal/cli.Version`）
+- 代码版本：`v0.4.0`（`internal/cli.Version`）
+- `v0.4.0` 相对 `v0.3.0` 的实质变化：
+  - 新增需求前提核查（ADR-31）：需求声称“测试缺失/需补充”时，规划前把现有测试中同名
+    引用的位置与文件内容注入规划器；前提不成立时停在 `NEEDS_INFO` 而不是产出重复改动。
+    全量基准回归 20/20 = 100%，平均 $0.0095（§22.3 第四轮）
 - `v0.3.0` 相对 `v0.2.0` 的实质变化（均为已验证项，见 §2）：
   - 红 CI → 自动修复闭环真实跑通，并修掉两个交付缺陷：CI 失败日志回传、PR 更新复用（§2）
   - 仓库 CI 启用（ubuntu + windows 双跑），新增 `.gitattributes` 固定 LF 检出（ADR-29）
@@ -71,7 +75,7 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
   `ci/github-workflow.yml.template` 保留作为分发模板，内容与启用后的文件一致。
 - 推送 `.github/workflows/*` 需要 `gh` 令牌具备 `workflow` scope：
   `gh auth refresh -h github.com -s workflow`。
-- 回退方式：`git checkout v0.3.0`。
-  **不要把 `v0.2.0` 当作当前的可回退基线**：回到 v0.2.0 会丢掉 ADR-29（CRLF 检出导致
-  Windows CI 全红）与 ADR-30（`ci: none` 抢跑污染 CI 首次通过率）的修复，
-  以及 `--ci-repo`。若确实要回退到 v0.2.0，需同时禁用仓库 CI 的 windows job。
+- 回退方式：`git checkout v0.4.0`。
+  **不要回退到 v0.2.0**：会丢掉 ADR-29（CRLF 检出导致 Windows CI 全红）、ADR-30
+  （`ci: none` 抢跑污染 CI 首次通过率）与 `--ci-repo`；若确实要回退，需同时禁用仓库 CI
+  的 windows job。
