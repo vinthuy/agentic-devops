@@ -1,10 +1,14 @@
+# 分发模板：本仓库已直接启用 .github/workflows/ci.yml，本文件保留给其他仓库复制使用。
 # 启用方式：
 #   1. 让 git 凭据具备 workflow 权限：gh auth refresh -h github.com -s workflow
 #   2. cp ci/github-workflow.yml.template .github/workflows/ci.yml
 #   3. git add .github/workflows/ci.yml && git push
 #
-# 之所以以模板形式存放：GitHub 拒绝没有 workflow scope 的 OAuth 令牌推送
+# 之所以保留模板形式：GitHub 拒绝没有 workflow scope 的 OAuth 令牌推送
 # .github/workflows/*，而 Gitee 不受此限制。模板可以正常版本化。
+#
+# 注意：Windows runner 默认以 CRLF 检出，gofmt 会把所有 .go 判为未格式化。
+# 复制本模板的同时必须带上仓库根的 .gitattributes（* text=auto eol=lf）。
 name: ci
 
 on:

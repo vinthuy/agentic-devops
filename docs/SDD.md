@@ -895,6 +895,7 @@ agentic-devops/
 | ADR-26 | 并发执行采用「一次批量领取 + worker 分发」，worktree 操作进程内串行化 | 每个 worker 循环调用 `NextRunnable`；或引入外部队列/多进程 | SQLite 没有 `SELECT ... FOR UPDATE`，边跑边领取会让两个 worker 拿到同一任务；批量领取后分发可以保证归属唯一。`git worktree add/remove` 会写共享仓库的管理文件，并发调用会踩踏，串行化这几毫秒操作比按仓库维护锁表更简单可靠。退出码按「需要人工 > 一般错误」聚合 |
 | ADR-27 | 前缀白名单只对**追加参数**做危险标志检查；精确匹配的整条命令视为可信 | 一律只做前缀匹配；或只允许完全相等的命令 | 审核中发现：配置 `go test ./...` 后，`go test ./... -exec <任意程序>` 会被前缀匹配放行，而 `-exec` 的作用正是用指定程序执行测试，等于绕过白名单执行任意代码。若改成只允许完全相等，又会让 `-run TestX` 这类正常用法失效。折中：配置者写下的完整命令可信（他要为该命令负责），追加参数才做 `-exec`/`-toolexec`/`--exec`/`-c` 检查 |
 | ADR-28 | 规划上下文注入需求中点名的文件内容（有界） | 只给文件列表；或把整个仓库塞进上下文 | 重复采样中出现假澄清：需求写明 `status.go`，规划器却要求“提供文件内容”。规划器没有工具，只看到文件列表，因此对“实现结构”类需求容易误判为信息不足。只读需求明确点名的文件（≤3 个、每个 ≤4000 字符、拒绝 `..` 越界），既解决假澄清，也不会让上下文失控 |
+| ADR-29 | 仓库内以 `.gitattributes` 固定 `* text=auto eol=lf` | 在 workflow 里放宽 gofmt 检查；或只在本地格式化 | CI 首次运行即在 Windows runner 上暴露：`core.autocrlf=true` 会把源码检出为 CRLF，`gofmt -l` 于是把 40 个 `.go` 全部列为“未格式化”。这不是代码问题，而是检出配置问题；放宽检查等于删除一道防线。用 `.gitattributes` 让所有平台按 LF 检出，gofmt 结果与平台无关，Windows 也能作为真正的回归环境 |
 
 ---
 
@@ -902,11 +903,11 @@ agentic-devops/
 
 | 项 | 当前状态 / 下一步 |
 |---|---|
-| 真实 GitHub CI 首次通过率 | 目标 ≥50% 尚未测量；需要授权目标仓库与真实 Draft PR。本地基准集已可运行，但未接真实 CI |
-| 基准集规模 | 已建立 `bench/` 与 6 个 S 级用例（Python + Go），PRD 目标是 20 个；扩样后成功率才有统计意义 |
-| 真实 push/CI 失败修复 | 代码路径与 Fake/Gh Runner 测试已覆盖；当前开发仓库没有配置 remote，未宣称线上闭环验证 |
+| 真实 GitHub CI 首次通过率 | 目标 ≥50% **仍未测量**。基础设施已就绪（本仓库 workflow 已启用，ubuntu + windows 双绿；沙箱仓库跑通红 CI → 修复）。但 §22 的 20 个基准用例尚未接真实 CI，单条沙箱剧本也确实首次即红（设计使然，不能计入首次通过率） |
+| 基准集规模 | 已建立 `bench/` 与 20 个 S 级用例（Python 10 / Go 7 / JS 3），达到 PRD 样本规模；但重复采样次数仍少，统计上只能算初步数据 |
+| ~~真实 push/CI 失败修复~~ | **已验证**（§23.8）：`vinthuy/agentdev-sandbox` 上真实触发 `ci_failed → fix_requested(source=ci) → 同一 PR 更新 → 第二次 CI 绿 → DONE`，`ci_attempts=1` |
 | Docker 容器后端 | 可选增强，不是本地开发或 M2 执行的前置条件；只有需要更强隔离时才排期 |
-| Linux 服务器兼容性 | Go 代码跨平台，但当前主要验证环境是 Windows；Linux 子进程、路径和 gh 行为需 CI 验证 |
+| ~~Linux 服务器兼容性~~ | **已由 CI 覆盖**：ubuntu-latest 上 gofmt、vet、build 与 18 个包测试全部通过（§23.8）。仍未覆盖其他发行版与容器内运行 |
 | 预算预测准确度 | 当前已有预算上限与逐调用记账；按历史均值给出任务前成本区间仍未实现 |
 | 防作弊误报率 | 规则有单元/组件覆盖；需用更多真实仓库基准统计误报 |
 
@@ -1128,10 +1129,10 @@ stateDiagram-v2
 | ~~G-06~~ | ~~审批时不能修改计划~~ | AC-09 | **已关闭**：`task approve --plan <file>`；计划须通过 `planning.Validate`，且 `allowed_paths` 只能收紧（`vettedPlanFile`/`scopeCovered`）；`TestApproveWithEditedPlan`、`TestVettedPlanFileScopeRules` | 已关闭 |
 | ~~G-07~~ | ~~没有并发任务上限~~ | AC-38 | **已关闭**：`run --parallel M`（上限受 `--max` 约束）；先批量领取任务再分发，`git worktree add/remove` 进程内串行化；每个任务独立后端与输出缓冲；退出码「需要人工」优先 | 已关闭 |
 | G-08 | 真实 CI 首次通过率仍未测量 | 21.6 | **大部分关闭**：20 个 S 级用例、3 个技术栈已建立并可复现运行；支持 `--repeat` 重复采样（见 §22）。剩余：接入真实仓库 CI 才能测 PRD 的 CI 首次通过率 | 高（产品验证） |
-| G-09 | 红 CI 自动修复与 CI 首次通过率仍未验证 | AC-28、REL-09 | **部分关闭**：真实 Draft PR 已在 `vinthuy/agentic-devops` 验证（PR #1，E2E-1/2/6 通过，见 §23.7）。E2E-3/4/5 需要仓库具备 CI：先 `gh auth refresh -h github.com -s workflow` 启用 workflow，再复跑 §23.3 | 高（产品验证） |
+| ~~G-09~~ | ~~红 CI 自动修复与 CI 首次通过率仍未验证~~ | AC-28、REL-09 | **已关闭（闭环部分）**：真实红 CI → 自动修复 → 同一 PR 更新 → 第二次 CI 绿已验证（§23.8，`t_20261024_9fe5ae`，`ci_attempts=1`，E2E-1…E2E-6 全通过）。仍开放的是**产品指标** CI 首次通过率：需把 §22 基准集接入真实 CI，当前样本为 0 | 已关闭 |
 | ~~G-10~~ | ~~进程崩溃恢复只有计数与状态测试，没有故障注入~~ | AC-37、REL 系列 | **已关闭**：`TestCrashDuringCodingThenResumeCompletes` 真正启动 CLI 子进程，在第 4 次模型调用处阻塞并 kill，再用新进程 resume；断言崩溃后状态仍为 CODING、已写入文件保留、恢复后 DONE 且任务提交恰好 1 个。另有两个状态边界测试覆盖 commit 后崩溃与“无改动仍挂起” | 已关闭 |
 
-> 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试），并新增 AC-07b 覆盖“验收标准本身写错”的归因。基准集已建立并测得 6 个用例 83% 的成功率（见 §22），但样本量未达 20，CI 首次通过率仍未测量，不能据此宣称 M1 退出标准达成。
+> 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试），并新增 AC-07b 覆盖“验收标准本身写错”的归因。基准集已建立并测得 20 个用例 95% 的重复采样成功率（见 §22）；红 CI 自动修复闭环已真实跑通（§23.8）。唯一仍未测量的产品指标是 CI 首次通过率——它要求基准集接入真实 CI，当前样本为 0，不能据此宣称 M1 退出标准全部达成。
 
 ---
 
@@ -1363,5 +1364,50 @@ gh pr checks <pr-number>
 | E2E-5 | **未执行**：同上 |
 | E2E-6 | **通过**：`gh pr checks` 返回 “no checks reported”，任务记录 `ci: none` 后完成，没有伪装成通过 |
 
-结论：**PR 交付路径已在真实 GitHub 上验证**；**红 CI 自动修复仍未验证**，需要先让仓库具备 CI（`gh auth refresh -h github.com -s workflow` 后启用 `ci/github-workflow.yml.template`），再复跑 §23.3。CI 首次通过率仍无法计算。
+结论（v0.2.0 时点）：**PR 交付路径已在真实 GitHub 上验证**；**红 CI 自动修复仍未验证**，需要先让仓库具备 CI（`gh auth refresh -h github.com -s workflow` 后启用 `ci/github-workflow.yml.template`），再复跑 §23.3。CI 首次通过率仍无法计算。
+
+### 23.8 红 CI 闭环首次真实执行结果（G-09 关闭）
+
+前置条件已满足：`gh auth refresh -h github.com -s workflow` 后，本仓库 workflow 启用为 `.github/workflows/ci.yml`（commit `f55725d`），并用 `.gitattributes` 固定 LF 检出（见 ADR-29）。
+
+**基础设施验证**
+
+| 项 | 结果 |
+|---|---|
+| CI run | [40083639699](https://github.com/vinthuy/agentic-devops/actions/runs/40083639699) |
+| 结果 | `test (ubuntu-latest)`、`test (windows-latest)`、`benchmark manifest` 三个 job 全绿 |
+| 首跑暴露的问题 | Windows runner 以 CRLF 检出，`gofmt -l` 把 40 个 `.go` 列为未格式化 → 加 `.gitattributes`（`* text=auto eol=lf`）后转绿 |
+| Linux 覆盖 | 18 个包在 ubuntu 上全部 `ok`；`internal/orchestrator` 7.3s（Windows 本地 165s，差异来自进程启动开销） |
+
+**失败→修复闭环**
+
+沙箱仓库 `vinthuy/agentdev-sandbox`（私有），`bench/sandbox/` 模板：`add` 返回 `a - b`，本地验证只跑 `test_core.py`，`test_edges.py` 的 `None`/`bool` 边界只在 CI 跑。
+
+| 项 | 结果 |
+|---|---|
+| 任务 | `t_20261024_9fe5ae`，真实 DeepSeek，175 秒，$0.0267 / 预算 $1.00 |
+| 流程 | TRIAGING → PLANNING → CODING → VERIFYING → REVIEWING(approve) → COMMITTING → PUSHED → PR_OPENED → CI_WATCHING → **CI_WATCHING→CODING（ci_failed）** → VERIFYING → REVIEWING(approve) → PUSHED → PR_OPENED → CI_WATCHING → DONE |
+| PR | https://github.com/vinthuy/agentdev-sandbox/pull/1（`isDraft: true`，base `main`，**全程只有这一个 PR**） |
+| 第一次提交 | `cd4c38a`：仅把 `return a - b` 改为 `return a + b`，本地 `test_core.py` 通过 |
+| 第一次 CI | [40084205085](https://github.com/vinthuy/agentdev-sandbox/actions/runs/40084205085)（push）/ [40084211688](https://github.com/vinthuy/agentdev-sandbox/actions/runs/40084211688)（pull_request）：**失败** |
+| 回修提交 | `54575a8`：补 `None`/`bool` 的 `ValueError` 校验 |
+| 第二次 CI | [40084335549](https://github.com/vinthuy/agentdev-sandbox/actions/runs/40084335549)（push）/ [40084338156](https://github.com/vinthuy/agentdev-sandbox/actions/runs/40084338156)（pull_request）：**通过** |
+| CI 修复次数 | `ci_attempts = 1`；验证与审查修复次数均为 0 |
+
+| 编号 | 结论 |
+|---|---|
+| E2E-1 | **通过**：只推送 `agent/t_20261024_9fe5ae-calc-py-add-a-b`，`main` 保持 `6d28844` 未变 |
+| E2E-2 | **通过**：Draft、base `main`、正文含需求、计划来源（模型生成）、允许改动范围 `calc.py`、3 条验收标准与结果矩阵、Reviewer approve、成本、报告路径、不自动合并声明 |
+| E2E-3 | **通过**：`ci_failed` 事件后紧跟 `fix_requested{source: "ci", attempt: 1}`，`failure` 字段带 CI 日志尾部，含 `ERROR: test_none_is_rejected_with_value_error (test_edges.EdgeTests...)` 与 traceback |
+| E2E-4 | **通过**：两次交付都指向 PR #1（`gh pr list --state all` 只有 1 个 PR，正文被更新而非新建），分支上 2 个提交 |
+| E2E-5 | **通过**：第二次 CI 全绿后 `CI_WATCHING → DONE`，`ci_attempts=1` |
+| E2E-6 | **通过**：`gh pr checks 1` 返回 2 条 `pass`（push 与 pull_request 各触发一次同名 job）；有 CI 时不再走 `ci: none` 分支 |
+
+补充观察（非缺陷，供后续评估）：
+
+1. 回修时模型不只是加校验，还顺带改了 `bool` 的语义（`add(True, 1)` 从返回 2 变成抛 `ValueError`）。Reviewer 以 `[low]` 记录了这一点、未阻塞——符合 ADR-20“只阻塞可指认的四类问题”，但说明「CI 边界测试」会反向塑造实现行为。
+2. 沙箱 workflow 同时监听 `push` 与 `pull_request`，同一提交会产生两条同名 check，报告中显示为“2 项检查失败（test, test）”。真实项目通常只监听其一；这不影响判定，但读报告时容易误解为两个不同 job。
+3. `ci_poll_seconds` 设为 15 秒时，两次 CI 观测分别耗时 26 秒与 19 秒，轮询开销可以接受。
+
+**CI 首次通过率**：本剧本**设计为首次必红**（本地验证刻意不含 CI 才跑的边界测试），因此不计入首次通过率分子。该指标仍需在 §22 基准集接入真实 CI 后测量；当前样本为 0，不能宣称达成 PRD 的 ≥50%。
 

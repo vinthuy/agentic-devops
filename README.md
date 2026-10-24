@@ -60,10 +60,10 @@ agentdev bench --manifest bench/tasks.yaml    # 基准集：成功率/成本/修
 基准集默认每个用例跑一次；加 `--repeat N` 可重复采样并按用例给出通过率，
 用于区分模型波动与真实能力差异。
 
-真实 Draft PR / CI 闭环的验证剧本见 `docs/SDD.md` §23，沙箱模板在 `bench/sandbox/`。
-本仓库自身的 CI 定义以模板形式存放在 `ci/github-workflow.yml.template`：
-GitHub 要求令牌具备 `workflow` scope 才能推送 `.github/workflows/*`，
-开通后复制到该路径即可启用。
+真实 Draft PR / CI 闭环的验证剧本见 `docs/SDD.md` §23；红 CI → 自动修复的首次真实结果见 §23.8，
+沙箱模板在 `bench/sandbox/`。本仓库自身的 CI 定义已启用为 `.github/workflows/ci.yml`
+（ubuntu + windows 双跑 gofmt/vet/build/test），`ci/github-workflow.yml.template` 保留作为分发模板。
+推送 `.github/workflows/*` 需要令牌具备 `workflow` scope：`gh auth refresh -h github.com -s workflow`。
 
 `--home` 是全局参数，可以放在任何子命令之后。
 
