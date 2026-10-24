@@ -1,4 +1,4 @@
-# 交接说明（v0.2.0）
+# 交接说明（v0.3.0）
 
 本文件记录当前版本**已验证**与**未验证**的边界，避免把单元测试通过当成线上可用。
 设计依据见 `docs/PRD.md`、`docs/SDD.md`；验收矩阵在 SDD §21。
@@ -60,9 +60,16 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 
 ## 5. 版本基线
 
-- 代码版本：`v0.2.0`（`internal/cli.Version`）
+- 代码版本：`v0.3.0`（`internal/cli.Version`）
+- `v0.3.0` 相对 `v0.2.0` 的实质变化（均为已验证项，见 §2）：
+  - 红 CI → 自动修复闭环真实跑通，并修掉两个交付缺陷：CI 失败日志回传、PR 更新复用（§2）
+  - 仓库 CI 启用（ubuntu + windows 双跑），新增 `.gitattributes` 固定 LF 检出（ADR-29）
+  - `agentdev bench --ci-repo`：基准集接入真实 CI，测量 CI 首次通过率（ADR-30 + `ci: none` 宽限期修复）
 - 本仓库 CI 已启用为 `.github/workflows/ci.yml`（提交 `f55725d`），配套提交 `da3a5b7` 增加 `.gitattributes`。
   `ci/github-workflow.yml.template` 保留作为分发模板，内容与启用后的文件一致。
 - 推送 `.github/workflows/*` 需要 `gh` 令牌具备 `workflow` scope：
   `gh auth refresh -h github.com -s workflow`。
-- 回退方式：`git checkout v0.2.0`。
+- 回退方式：`git checkout v0.3.0`。
+  **不要把 `v0.2.0` 当作当前的可回退基线**：回到 v0.2.0 会丢掉 ADR-29（CRLF 检出导致
+  Windows CI 全红）与 ADR-30（`ci: none` 抢跑污染 CI 首次通过率）的修复，
+  以及 `--ci-repo`。若确实要回退到 v0.2.0，需同时禁用仓库 CI 的 windows job。

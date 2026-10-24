@@ -969,7 +969,7 @@ stateDiagram-v2
 | 提示词 | `internal/*/prompts/*.md`（`go:embed`） | triage / planner / coder / reviewer 的 v1 版本 | 文件名带版本；修改后需通过相关单元与端到端测试 |
 | 事件目录 | §20.1 | 事件类型、发出位置、负载键、是否属于降级 | 新事件必须登记于此；降级类事件必须登记于 `degradationLabels` |
 | 运行产物 | `runs/<task>/report.md`、`events.jsonl`、`artifacts/` | 审计用报告、事件流、命令日志 | 报告章节由 `internal/report` 渲染，章节变化需报告测试 |
-| 决策记录 | §17（ADR-01 至 ADR-22） | 设计决策、备选方案与理由 | 已有 ADR 不得改写结论；推翻需新增 ADR 并注明取代关系 |
+| 决策记录 | §17（ADR-01 至 ADR-30） | 设计决策、备选方案与理由 | 已有 ADR 不得改写结论；推翻需新增 ADR 并注明取代关系 |
 | 限制与待验证项 | §18 | 当前已知限制与线上验证缺口 | 缺口关闭时在同一提交中删除对应条目 |
 | 验收矩阵 | §21 | 每条验收标准、测试映射、状态 | 测试改名或删除时必须同步更新映射 |
 
@@ -1438,7 +1438,7 @@ gh pr checks <pr-number>
 | E2E-5 | **未执行**：同上 |
 | E2E-6 | **通过**：`gh pr checks` 返回 “no checks reported”，任务记录 `ci: none` 后完成，没有伪装成通过 |
 
-结论（v0.2.0 时点）：**PR 交付路径已在真实 GitHub 上验证**；**红 CI 自动修复仍未验证**，需要先让仓库具备 CI（`gh auth refresh -h github.com -s workflow` 后启用 `ci/github-workflow.yml.template`），再复跑 §23.3。CI 首次通过率仍无法计算。
+结论（v0.2.0 时点，已被 §23.8 取代）：**PR 交付路径已在真实 GitHub 上验证**；**红 CI 自动修复仍未验证**，需要先让仓库具备 CI（`gh auth refresh -h github.com -s workflow` 后启用 `ci/github-workflow.yml.template`），再复跑 §23.3。CI 首次通过率仍无法计算。
 
 ### 23.8 红 CI 闭环首次真实执行结果（G-09 关闭）
 
