@@ -33,10 +33,10 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 | 崩溃恢复 | 真实子进程在模型调用中途被 kill，重启后完成且只产生 1 个提交 |
 | 策略 | 路径穿越、符号链接逃逸、敏感路径、危险命令、`-exec` 类追加参数均被拒绝 |
 | 成本 | 逐次模型调用记账、80% 预警、100% 熔断；缺单价显式告警 |
-| 真实 Draft PR | 在本仓库上跑通：PR #1，仅改目标文件、Draft、正文含验收矩阵与成本、Reviewer approve、`master` 未被改动 |
+| 真实 Draft PR | 在本仓库上跑通：PR #1（后因需求前提不成立而关闭，见 SDD §18），仅改目标文件、Draft、正文含验收矩阵与成本、Reviewer approve、`master` 未被改动 |
 | 无 CI 时的处理 | `gh pr checks` 无检查时记录 `ci: none` 后完成，不伪装成通过 |
 | 交付（CI 回修） | 密钥扫描、分支推送、幂等 PR 更新由 Fake/替身覆盖；红 CI 回修已在真实仓库验证（见下条） |
-| **红 CI → 自动修复闭环** | `vinthuy/agentdev-sandbox` 上真实跑通：首次 CI 失败（`test_edges.py` 的 None/bool 边界）→ `fix_requested{source: ci}` 携带 CI 日志尾部 → 回修 → **同一个 PR #1** 更新 → 第二次 CI 绿 → `DONE`，`ci_attempts=1`，$0.0267。E2E-1…E2E-6 全部通过（SDD §23.8） |
+| **红 CI → 自动修复闭环** | `vinthuy/agentdev-sandbox` 上真实跑通：首次 CI 失败（`test_edges.py` 的 None/bool 边界）→ `fix_requested{source: ci}` 携带 CI 日志尾部 → 回修 → **同一个 PR 更新**（沙箱仓库的 PR #1，与本仓库的 PR #1 无关）→ 第二次 CI 绿 → `DONE`，`ci_attempts=1`，$0.0267。E2E-1…E2E-6 全部通过（SDD §23.8） |
 | **本仓库 CI（双 OS）** | `.github/workflows/ci.yml` 已启用：run [40083639699](https://github.com/vinthuy/agentic-devops/actions/runs/40083639699) 的 `test (ubuntu-latest)`、`test (windows-latest)`、`benchmark manifest` 全绿。18 个包在 Linux 上全部通过 |
 | CI 首跑发现的问题 | Windows runner 以 CRLF 检出导致 `gofmt -l` 误报全部 40 个 `.go`；加 `.gitattributes`（`* text=auto eol=lf`）后修复（ADR-29） |
 | **CI 首次通过率（PRD ≥50%）** | `bench --ci-repo vinthuy/agentdev-sandbox` 让 20 个基准用例各开一个真实草稿 PR 并等待真实 CI：**20/20 = 100%**，`ci_none=0`，平均 $0.00825/次，总 $0.165（SDD §22.6）。口径：CI 与本地验证跑同一批命令 |

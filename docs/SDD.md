@@ -1427,6 +1427,7 @@ gh pr checks <pr-number>
 | 任务 | `t_20261018_4ef952`，真实 DeepSeek，148 秒，$0.0285 |
 | 流程 | TRIAGING → PLANNING → CODING → VERIFYING → REVIEWING(approve) → COMMITTING → PUSHED → PR_OPENED → CI_WATCHING → DONE |
 | PR | https://github.com/vinthuy/agentic-devops/pull/1（`isDraft: true`，base `master`） |
+| 后续处置 | 该 PR 后来被**关闭（未合并）**：它要求“补充缓存计价测试”，但 `TestTableComputesCostPerMillionTokens` 在基线提交上已覆盖 cache_read/cache_write。关闭不影响本节结论——这里验证的是交付链路（Draft、正文、分支隔离），不是那个测试的价值。见 §18「需求前提本身不成立时无检测」 |
 | 改动 | 仅 `internal/cost/cost_test.go`，新增 `TestTableCostCachePricing` |
 | 独立复核 | 在任务分支上重跑该测试：通过 |
 
