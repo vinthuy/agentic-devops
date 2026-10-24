@@ -343,6 +343,21 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 		ExistingCoverage: coverage,
 		CoverageFiles:    planning.CoverageSnippets(repo.LocalPath, coverage, 2, 4000),
 	}
+	// 需求对现有实现提主张时，把被点名符号的实现位置注入上下文：
+	// 规划器看不到仓库，“没处理空字符串”这类说法它无法自行核对。
+	implHits := planning.ImplementationHits(task.Requirement, repo.LocalPath, 4)
+	req.Implementation = implHits
+	req.ImplementationFiles = planning.ImplementationSnippets(repo.LocalPath, implHits, 2, 3000)
+	// AGENTDEV_DEBUG_CONTEXT 用来回答“规划器到底看没看到这条证据”——
+	// 证据没注入和注入了但模型无视，是两种完全不同的缺陷，只能靠这个区分。
+	// 默认关闭，不影响正常运行与输出。
+	if os.Getenv("AGENTDEV_DEBUG_CONTEXT") != "" {
+		fmt.Fprintf(os.Stderr, "[debug] coverageHits=%d coverageFiles=%d implHits=%d implFiles=%d\n",
+			len(coverage), len(req.CoverageFiles), len(implHits), len(req.ImplementationFiles))
+		for _, h := range implHits {
+			fmt.Fprintf(os.Stderr, "[debug]   impl %s -> %s:%d definition=%v\n", h.Identifier, h.File, h.Line, h.Definition)
+		}
+	}
 
 	// 在开始花钱之前记录预测，任务结束后可用 forecast --accuracy 校准。
 	// 预测是建议性的：失败不影响任务推进，所以这里不返回错误。

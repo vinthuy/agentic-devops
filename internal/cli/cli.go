@@ -35,7 +35,7 @@ import (
 	"agentdev/internal/workspace"
 )
 
-const Version = "0.6.0"
+const Version = "0.7.0"
 
 const (
 	ExitOK    = 0

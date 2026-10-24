@@ -230,6 +230,12 @@ type Requirement struct {
 	ExistingCoverage []CoverageHit
 	// CoverageFiles 是上述命中文件的内容。没有内容，规划器无法判断已有断言覆盖了什么。
 	CoverageFiles map[string]string
+	// Implementation 是需求点名的标识符在实现代码中的位置。
+	// 需求对现有实现提主张（“没处理空字符串”“改为按百万计价”）时，规划器必须看到
+	// 现有实现才能判断主张是否成立；只靠需求原文它会凭空猜。
+	Implementation []ImplHit
+	// ImplementationFiles 是上述命中位置附近的代码窗口（带行号）。
+	ImplementationFiles map[string]string
 }
 
 // Planner 生成实施计划。
@@ -298,6 +304,31 @@ func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) 
 			}
 		}
 		b.WriteString("</existing_coverage>")
+	}
+
+	if len(req.Implementation) > 0 {
+		b.WriteString("\n<existing_implementation trusted=\"true\">\n")
+		b.WriteString("需求对现有实现提出了主张或改动要求。以下是需求点名标识符在实现代码中的位置")
+		b.WriteString("（定义处优先，其次是引用处）：\n")
+		for _, h := range req.Implementation {
+			kind := "引用"
+			if h.Definition {
+				kind = "定义"
+			}
+			fmt.Fprintf(&b, "- %s → %s:%d（%s）\n", h.Identifier, h.File, h.Line, kind)
+		}
+		if len(req.ImplementationFiles) > 0 {
+			b.WriteString("对应代码窗口（行号见每行前缀）：\n")
+			paths := make([]string, 0, len(req.ImplementationFiles))
+			for path := range req.ImplementationFiles {
+				paths = append(paths, path)
+			}
+			sort.Strings(paths)
+			for _, path := range paths {
+				fmt.Fprintf(&b, "<file path=\"%s\">\n%s\n</file>\n", path, req.ImplementationFiles[path])
+			}
+		}
+		b.WriteString("</existing_implementation>")
 	}
 
 	resp, input, err := p.Client.CallTool(ctx, llm.Request{

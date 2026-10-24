@@ -168,6 +168,52 @@ func TestModelPlannerIncludesExistingCoverageEvidence(t *testing.T) {
 	}
 }
 
+// 需求对现有实现提主张时，实现位置与代码窗口必须真的进入提示：
+// 规划器看不到仓库，“没处理空字符串”这类说法它无法自行核对。
+func TestModelPlannerIncludesImplementationEvidence(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var req struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &req); err == nil && len(req.Messages) > 0 {
+			body = req.Messages[0].Content
+		}
+		io.WriteString(w, `{
+			"content": [{"type":"tool_use","id":"t1","name":"submit_plan","input":{
+				"status":"needs_info","summary":"前提不成立",
+				"questions":["ParsePort 已拒绝空字符串，请确认要改什么"],
+				"acceptance":[]
+			}}],
+			"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}
+		}`)
+	}))
+	defer srv.Close()
+
+	p := &ModelPlanner{Client: llm.NewClient(srv.URL, "k"), Model: "m", MaxTokens: 10}
+	_, err := p.Plan(context.Background(), Requirement{
+		Text:        "ParsePort 没处理空字符串",
+		VerifyNames: []string{"test"},
+		Implementation: []ImplHit{
+			{Identifier: "ParsePort", File: "port.go", Line: 6, Definition: true},
+		},
+		ImplementationFiles: map[string]string{
+			"port.go": "6| func ParsePort(s string) (int, error) {\n7| \tif s == \"\" {",
+		},
+	})
+	if err != nil {
+		t.Fatalf("规划失败: %v", err)
+	}
+	for _, want := range []string{"<existing_implementation", "port.go:6", "定义", "if s == \"\""} {
+		if !strings.Contains(body, want) {
+			t.Errorf("提示中缺少 %q，规划器无法判断实现前提是否成立", want)
+		}
+	}
+}
+
 func TestModelPlannerRejectsInvalidPlan(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{
