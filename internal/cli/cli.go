@@ -23,6 +23,7 @@ import (
 	"agentdev/internal/bench"
 	"agentdev/internal/config"
 	"agentdev/internal/cost"
+	"agentdev/internal/delivery"
 	"agentdev/internal/llm"
 	"agentdev/internal/orchestrator"
 	"agentdev/internal/planning"
@@ -1333,6 +1334,11 @@ func benchCmd(opts *options) *cobra.Command {
 		asJSON       bool
 		minRate      float64
 		repeat       int
+		ciRepo       string
+		ciCleanup    bool
+		ciPoll       int
+		ciTimeout    int
+		ciWorkflow   string
 	)
 	cmd := &cobra.Command{
 		Use:   "bench",
@@ -1373,6 +1379,30 @@ func benchCmd(opts *options) *cobra.Command {
 					return makeBackend(cfg, backendName, scriptPath)
 				},
 			}
+			if ciRepo != "" {
+				if backendName == "fake" {
+					// Fake 后端不会产生真实改动，跑真实 CI 只会得到无意义的失败。
+					return fail(ExitUsage, "--ci-repo 需要真实后端，不能用 --backend fake")
+				}
+				if !delivery.Available() {
+					return fail(ExitUsage, "--ci-repo 需要 gh CLI 创建 PR 与查询 CI")
+				}
+				if !strings.Contains(ciRepo, "/") {
+					return fail(ExitUsage, "--ci-repo 格式应为 owner/name")
+				}
+				ci := &bench.CIRemote{
+					Repo: ciRepo, Cleanup: ciCleanup,
+					PollSeconds: ciPoll, TimeoutMinutes: ciTimeout,
+				}
+				if ciWorkflow != "" {
+					data, err := os.ReadFile(ciWorkflow)
+					if err != nil {
+						return fail(ExitUsage, "读取 CI 定义失败: %v", err)
+					}
+					ci.Workflow = string(data)
+				}
+				benchOpts.CI = ci
+			}
 			if backendName != "fake" {
 				key := os.Getenv(cfg.Models.APIKeyEnv)
 				if key == "" {
@@ -1401,7 +1431,11 @@ func benchCmd(opts *options) *cobra.Command {
 				return encoder.Encode(map[string]any{"summary": summary, "outcomes": outcomes})
 			}
 			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "用例\t轮次\t结果\t级别\t花费\t修复\t审查\tCI\t降级")
+			if benchOpts.CI != nil {
+				fmt.Fprintln(w, "用例\t轮次\t结果\t级别\t花费\t修复\t审查\tCI\t首次通过\t降级")
+			} else {
+				fmt.Fprintln(w, "用例\t轮次\t结果\t级别\t花费\t修复\t审查\tCI\t降级")
+			}
 			for _, o := range outcomes {
 				mark := "FAIL"
 				switch {
@@ -1410,9 +1444,24 @@ func benchCmd(opts *options) *cobra.Command {
 				case o.Passed:
 					mark = "PASS"
 				}
-				fmt.Fprintf(w, "%s\t%d\t%s\t%s\t$%.4f\t%d\t%d\t%d\t%d\n",
-					o.ID, o.Run, mark, orDash(o.Level), o.SpentUSD,
-					o.FixAttempts, o.ReviewAttempts, o.CIAttempts, o.Degradations)
+				if benchOpts.CI != nil {
+					first := "否"
+					switch {
+					case o.CIFirstPass:
+						first = "是"
+					case o.CIVerdict == "none":
+						first = "无 CI"
+					case o.CIVerdict == "unknown" || o.CIVerdict == "":
+						first = "未知"
+					}
+					fmt.Fprintf(w, "%s\t%d\t%s\t%s\t$%.4f\t%d\t%d\t%d\t%s\t%d\n",
+						o.ID, o.Run, mark, orDash(o.Level), o.SpentUSD,
+						o.FixAttempts, o.ReviewAttempts, o.CIAttempts, first, o.Degradations)
+				} else {
+					fmt.Fprintf(w, "%s\t%d\t%s\t%s\t$%.4f\t%d\t%d\t%d\t%d\n",
+						o.ID, o.Run, mark, orDash(o.Level), o.SpentUSD,
+						o.FixAttempts, o.ReviewAttempts, o.CIAttempts, o.Degradations)
+				}
 			}
 			if err := w.Flush(); err != nil {
 				return err
@@ -1438,6 +1487,17 @@ func benchCmd(opts *options) *cobra.Command {
 			if summary.Blocked > 0 {
 				fmt.Fprintf(out, "[WARN] 另有 %d 次运行被基础设施阻断（模型余额/配额），未计入分母。\n", summary.Blocked)
 			}
+			if benchOpts.CI != nil {
+				if summary.CIRuns > 0 {
+					fmt.Fprintf(out, "CI 首次通过率 %d/%d = %.0f%%（分母只含真正跑过检查的交付）\n",
+						summary.CIFirstPass, summary.CIRuns, summary.CIFirstPassRate*100)
+				} else {
+					fmt.Fprintln(out, "[WARN] 没有任何交付真正跑过 CI，CI 首次通过率无法计算。")
+				}
+				if summary.CINone > 0 {
+					fmt.Fprintf(out, "[WARN] 另有 %d 次交付的 PR 上没有检查（ci: none），未计入分母。\n", summary.CINone)
+				}
+			}
 			if minRate > 0 && summary.SuccessRate < minRate {
 				return fail(ExitError, "成功率 %.0f%% 低于门槛 %.0f%%", summary.SuccessRate*100, minRate*100)
 			}
@@ -1454,6 +1514,11 @@ func benchCmd(opts *options) *cobra.Command {
 	f.BoolVar(&asJSON, "json", false, "以 JSON 输出")
 	f.Float64Var(&minRate, "min-rate", 0, "成功率低于该值（0-1）时以退出码 1 结束")
 	f.IntVar(&repeat, "repeat", 1, "每个用例重复运行次数，用于观察波动")
+	f.StringVar(&ciRepo, "ci-repo", "", "在真实仓库（owner/name）上运行，用真实 CI 统计首次通过率")
+	f.BoolVar(&ciCleanup, "ci-cleanup", true, "CI 模式下用例结束后关闭 PR 并删除远端分支")
+	f.IntVar(&ciPoll, "ci-poll", 15, "CI 轮询间隔（秒）")
+	f.IntVar(&ciTimeout, "ci-timeout", 10, "单个用例等待 CI 的上限（分钟）")
+	f.StringVar(&ciWorkflow, "ci-workflow", "", "写入基线分支的 CI 定义文件（默认内置通用模板）")
 	return cmd
 }
 

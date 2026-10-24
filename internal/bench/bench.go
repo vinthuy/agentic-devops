@@ -66,6 +66,14 @@ type Outcome struct {
 	CIAttempts     int     `json:"ci_attempts"`
 	Degradations   int     `json:"degradations"`
 	DurationS      float64 `json:"duration_s"`
+	// CIVerdict 是最终 CI 判定：passed / failed / none / unknown（空表示未启用真实 CI）。
+	CIVerdict string `json:"ci_verdict,omitempty"`
+	// CIFirstPass 为 true 表示 PR 的第一次 CI 就通过，中途没有回修。
+	CIFirstPass bool `json:"ci_first_pass,omitempty"`
+	// BaseBranch 是启用 --ci-repo 时该用例独占的 PR base 分支。
+	BaseBranch string `json:"base_branch,omitempty"`
+	// PRURL 是交付产生的草稿 PR（启用 --ci-repo 时有值）。
+	PRURL string `json:"pr_url,omitempty"`
 	// Blocked 表示运行被基础设施问题阻断（如模型余额不足），
 	// 与产品能力无关，不应计入成功率分母。
 	Blocked bool   `json:"blocked,omitempty"`
@@ -85,6 +93,14 @@ type Summary struct {
 	MeanCostUSD   float64 `json:"mean_cost_usd"`
 	MeanFixRounds float64 `json:"mean_fix_rounds"`
 	TotalCostUSD  float64 `json:"total_cost_usd"`
+	// CIRuns 是真正跑过检查的交付次数；CI 首次通过率的分母。
+	CIRuns int `json:"ci_runs"`
+	// CIFirstPass 是第一次 CI 就通过（未回修）的次数。
+	CIFirstPass int `json:"ci_first_pass"`
+	// CIFirstPassRate 即 PRD 的 CI 首次通过率；CIRuns 为 0 时无意义（保持 0）。
+	CIFirstPassRate float64 `json:"ci_first_pass_rate"`
+	// CINone 是 PR 上没有检查的次数；按设计不计入分母，但必须显式披露。
+	CINone int `json:"ci_none"`
 }
 
 // ModelConfig 非 nil 时启用模型分级、规划与审查，并记录费用。
@@ -108,6 +124,9 @@ type Options struct {
 	Repeat int
 	// Keep 为 true 时保留临时目录，便于排查失败用例。
 	Keep bool
+	// CI 非 nil 时，每个用例都会推送到真实远端并开启 delivery + ci_watch，
+	// 用真实 CI 的结果统计首次通过率。为 nil 时完全离线（旧行为）。
+	CI *CIRemote
 	// Log 接收逐用例进度输出，可为 nil。
 	Log io.Writer
 }
@@ -217,10 +236,32 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 		outcome.Status = "ERROR"
 		return outcome
 	}
+	var ci CIRemote
+	if opts.CI != nil {
+		ci = opts.CI.withDefaults()
+		if err := writeCIWorkflow(repoDir, ci); err != nil {
+			outcome.Err = "写入 CI 定义失败: " + err.Error()
+			outcome.Status = "ERROR"
+			return outcome
+		}
+	}
 	if err := initRepo(repoDir); err != nil {
 		outcome.Err = "初始化仓库失败: " + err.Error()
 		outcome.Status = "ERROR"
 		return outcome
+	}
+	// defaultBranch 默认是 main；启用真实 CI 时改为该用例独占的基线分支。
+	defaultBranch := "main"
+	headBranch := ""
+	if opts.CI != nil {
+		base, err := pushBaseline(repoDir, c.ID, run, ci)
+		if err != nil {
+			outcome.Err = "准备远端基线失败: " + err.Error()
+			outcome.Status = "ERROR"
+			return outcome
+		}
+		defaultBranch = base
+		outcome.BaseBranch = base
 	}
 
 	home := filepath.Join(work, "home")
@@ -242,14 +283,23 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 	cfg.Repos = map[string]config.RepoConfig{
 		"bench/" + c.ID: {
 			LocalPath:         repoDir,
-			DefaultBranch:     "main",
-			Remote:            "origin",
+			DefaultBranch:     defaultBranch,
+			Remote:            ci.RemoteName,
 			VerifyCommands:    orderedVerify(c.Verify),
 			VerifyConfigFiles: c.VerifyConfigFiles,
 			BudgetUSD:         budget,
 		},
 	}
-	cfg.Delivery.Enabled = false
+	if opts.CI != nil {
+		cfg.Delivery.Enabled = true
+		cfg.Delivery.DraftPR = true
+		cfg.Delivery.CIWatch = true
+		cfg.Delivery.MaxCIAttempts = 2
+		cfg.Delivery.CITimeoutMinutes = ci.TimeoutMinutes
+		cfg.Delivery.CIPollSeconds = ci.PollSeconds
+	} else {
+		cfg.Delivery.Enabled = false
+	}
 	cfg.Review.Enabled = opts.Model != nil || opts.Reviewer != nil
 	cfg.Triage.UseModel = opts.Model != nil
 	cfg.Planning.Mode = "auto"
@@ -288,6 +338,7 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 	orch := orchestrator.New(st, cfg, be, orchOpts...)
 
 	result, runErr := orch.RunTask(task.ID)
+	headBranch = result.Branch
 	outcome.DurationS = time.Since(started).Seconds()
 	if runErr != nil {
 		outcome.Err = runErr.Error()
@@ -301,6 +352,7 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 	outcome.FixAttempts = result.FixAttempts
 	outcome.ReviewAttempts = result.ReviewAttempts
 	outcome.CIAttempts = result.CIAttempts
+	outcome.PRURL = result.PRURL
 	outcome.LevelMatched = c.ExpectLevel == "" || strings.EqualFold(result.Level, c.ExpectLevel)
 	outcome.Passed = result.Status == state.Done && runErr == nil && outcome.LevelMatched
 
@@ -309,11 +361,57 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 		for _, e := range events {
 			if e.Type == "provider_quota" {
 				outcome.Blocked = true
-				break
 			}
 		}
+		if opts.CI != nil {
+			outcome.CIVerdict = ciVerdict(events)
+			// “首次即通过”要求真的跑过检查，且全程没有因为 CI 失败回过炉。
+			outcome.CIFirstPass = outcome.CIVerdict == "passed" && result.CIAttempts == 0
+		}
+	}
+
+	if opts.CI != nil && ci.Cleanup {
+		cleanupCase(ctx, repoDir, headBranch, outcome.BaseBranch, result.PRNumber, ci, opts.Log)
 	}
 	return outcome
+}
+
+// ciVerdict 从事件流里取本任务最终的 CI 判定。
+//
+// 不能只看任务状态：DONE 既可能是“CI 通过”，也可能是“没有 CI”。
+// 两者在交付质量上是完全不同的结论，混在一起会把没跑过的检查算成通过。
+// 同理，CI 失败后挂起（NEEDS_HUMAN）没有 DONE 事件，但它确实跑过 CI 且失败，
+// 必须计入分母，不能退化成“未知”被悄悄排除。
+func ciVerdict(events []store.Event) string {
+	verdict := ""
+	sawCIFailure := false
+	for _, e := range events {
+		if e.Type == "ci_failed" {
+			sawCIFailure = true
+			continue
+		}
+		if e.Type != "state_changed" || e.ToStatus != string(state.Done) {
+			continue
+		}
+		if v, ok := e.Payload["ci"].(string); ok && v != "" {
+			verdict = v
+		}
+	}
+	switch verdict {
+	case "passed", "failed", "none":
+		return verdict
+	case "":
+		if sawCIFailure {
+			return "failed"
+		}
+		return "unknown"
+	default:
+		// skipped 等其它取值同样不构成“跑过 CI”。
+		if sawCIFailure {
+			return "failed"
+		}
+		return "unknown"
+	}
 }
 
 func summarize(outcomes []Outcome, caseCount int) Summary {
@@ -334,6 +432,17 @@ func summarize(outcomes []Outcome, caseCount int) Summary {
 			s.Blocked++
 			continue
 		}
+		switch o.CIVerdict {
+		case "passed", "failed":
+			// 只有真的跑过检查才进分母：passed 且未回修才计为首次通过。
+			s.CIRuns++
+			if o.CIFirstPass {
+				s.CIFirstPass++
+			}
+		case "none":
+			// 没有 CI 是独立结论，既不算通过也不算失败，但必须被看见。
+			s.CINone++
+		}
 		executedSpend += o.SpentUSD
 		if o.Passed {
 			s.Passed++
@@ -352,6 +461,9 @@ func summarize(outcomes []Outcome, caseCount int) Summary {
 	s.HumanRate = s.HumanRate / executed
 	s.MeanCostUSD = executedSpend / executed
 	s.MeanFixRounds = float64(fixRounds) / executed
+	if s.CIRuns > 0 {
+		s.CIFirstPassRate = float64(s.CIFirstPass) / float64(s.CIRuns)
+	}
 	return s
 }
 

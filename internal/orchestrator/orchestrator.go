@@ -37,18 +37,21 @@ type Orchestrator struct {
 	ws      *workspace.Manager
 
 	// 模型相关（可选）。为 nil 时退化为纯规则 + 静态计划，可完全离线运行。
-	model      *llm.Client
-	modelName  string
-	maxTokens  int
-	pricing    cost.Table
-	planner    planning.Planner
-	reviewer   review.Reviewer
-	codeHost   delivery.CodeHost
-	ciWatcher  delivery.CIWatcher
-	ciPoll     time.Duration
-	ciTimeout  time.Duration
-	sleep      func(context.Context, time.Duration) error
-	forceDelev bool
+	model     *llm.Client
+	modelName string
+	maxTokens int
+	pricing   cost.Table
+	planner   planning.Planner
+	reviewer  review.Reviewer
+	codeHost  delivery.CodeHost
+	ciWatcher delivery.CIWatcher
+	ciPoll    time.Duration
+	ciTimeout time.Duration
+	// ciNoneGrace 是“PR 上没有检查”需要持续多久才判定为无 CI。
+	// 刚创建的 PR 与没有 workflow 的 PR 在 gh 输出上无法区分（ADR-30）。
+	ciNoneGrace time.Duration
+	sleep       func(context.Context, time.Duration) error
+	forceDelev  bool
 
 	warnedPricing bool
 	warnedBudget  bool
@@ -95,6 +98,12 @@ func WithCITiming(poll, timeout time.Duration) Option {
 		o.ciPoll = poll
 		o.ciTimeout = timeout
 	}
+}
+
+// WithCINoneGrace 覆盖“多久没看到检查才算无 CI”的宽限期（测试用）。
+// 这是为了区分“PR 刚创建、检查还没注册”与“仓库真的没有 CI”。
+func WithCINoneGrace(d time.Duration) Option {
+	return func(o *Orchestrator) { o.ciNoneGrace = d }
 }
 
 // WithDelivery 强制开启推送与创建 PR，用于覆盖 delivery.enabled。
@@ -972,6 +981,20 @@ func (o *Orchestrator) ciStep(task store.Task, repo config.RepoConfig) (store.Ta
 		Head:     task.Branch,
 	}
 	deadline := time.Now().Add(o.ciTimeout)
+	// noneGrace：两个轮询周期起步，至少给 GitHub 一次注册检查的机会，
+	// 又不会在真的没有 CI 时无谓地等到总超时。
+	noneGrace := o.ciNoneGrace
+	if noneGrace <= 0 {
+		noneGrace = 2 * o.ciPoll
+		if noneGrace < 30*time.Second {
+			noneGrace = 30 * time.Second
+		}
+	}
+	// noneSince 记录“第一次看到 PR 上没有检查”的时间。
+	// 刚创建的 PR 可能还没把检查注册上去，此时 gh pr checks 与“仓库没有 CI”
+	// 返回同一句话；若立刻收尾，就会把一次尚未开始的 CI 判成“无 CI”，
+	// 从而把没跑过的检查当成完成（ADR-30）。
+	var noneSince time.Time
 
 	for {
 		snap, err := watcher.Checks(context.Background(), req)
@@ -980,13 +1003,28 @@ func (o *Orchestrator) ciStep(task store.Task, repo config.RepoConfig) (store.Ta
 		}
 		switch snap.State {
 		case delivery.CINone:
-			return finish(map[string]any{
-				"ci": "none", "summary": snap.Summary,
-				"note": "PR 上未配置 CI 检查，按无 CI 处理",
-			})
+			if noneSince.IsZero() {
+				noneSince = time.Now()
+			}
+			if time.Since(noneSince) >= noneGrace {
+				return finish(map[string]any{
+					"ci": "none", "summary": snap.Summary,
+					"note": fmt.Sprintf("PR 上连续 %s 没有出现检查，按无 CI 处理", noneGrace),
+				})
+			}
+			if !time.Now().Before(deadline) {
+				return o.move(task, state.NeedsHuman, map[string]any{
+					"reason":  fmt.Sprintf("等待 CI 出现超过 %s：既没有检查也没有结论", o.ciTimeout),
+					"summary": snap.Summary,
+				}, nil)
+			}
+			if serr := o.sleep(context.Background(), o.pollWait(deadline)); serr != nil {
+				return task, serr
+			}
 		case delivery.CIPassed:
 			return finish(map[string]any{"ci": "passed", "summary": snap.Summary})
 		case delivery.CIFailed:
+			noneSince = time.Time{}
 			snap.Summary = delivery.RedactText(snap.Summary)
 			snap.Logs = delivery.RedactText(snap.Logs)
 			if aerr := o.store.AppendEvent(task.ID, "ci_failed", map[string]any{
@@ -1016,24 +1054,29 @@ func (o *Orchestrator) ciStep(task store.Task, repo config.RepoConfig) (store.Ta
 				"ci": "failed", "attempt": attempts, "summary": snap.Summary,
 			}, map[string]any{"ci_attempts": attempts})
 		case delivery.CIPending:
+			noneSince = time.Time{}
 			if !time.Now().Before(deadline) {
 				return o.move(task, state.NeedsHuman, map[string]any{
 					"reason":  fmt.Sprintf("CI 超过 %s 仍未完成", o.ciTimeout),
 					"summary": snap.Summary,
 				}, nil)
 			}
-			wait := o.ciPoll
-			remaining := time.Until(deadline)
-			if wait > remaining {
-				wait = remaining
-			}
-			if serr := o.sleep(context.Background(), wait); serr != nil {
+			if serr := o.sleep(context.Background(), o.pollWait(deadline)); serr != nil {
 				return task, serr
 			}
 		default:
 			return o.suspend(task, "未知的 CI 状态: "+string(snap.State))
 		}
 	}
+}
+
+// pollWait 返回下一次轮询的等待时间，绝不超过总超时的剩余时间。
+func (o *Orchestrator) pollWait(deadline time.Time) time.Duration {
+	wait := o.ciPoll
+	if remaining := time.Until(deadline); wait > remaining {
+		wait = remaining
+	}
+	return wait
 }
 
 // ---- 计费与预算 ----

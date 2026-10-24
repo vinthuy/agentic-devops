@@ -52,6 +52,7 @@ agentdev task logs <task-id> [--limit N] [--json]   # 完整审计时间线
 agentdev cost <task-id>                       # 花费明细
 agentdev cost report                          # 全局成本看板
 agentdev bench --manifest bench/tasks.yaml    # 基准集：成功率/成本/修复轮数
+agentdev bench --manifest bench/tasks.yaml --ci-repo owner/name  # 接真实 CI，测 CI 首次通过率
 ```
 
 `task approve` 支持 `--plan <file>`：人工可用修改后的 JSON 计划覆盖原计划，
@@ -59,6 +60,11 @@ agentdev bench --manifest bench/tasks.yaml    # 基准集：成功率/成本/修
 
 基准集默认每个用例跑一次；加 `--repeat N` 可重复采样并按用例给出通过率，
 用于区分模型波动与真实能力差异。
+
+`--ci-repo owner/name` 把每个用例的 fixture 推到该仓库中**独占的基线分支**，
+让 Agent 开真实草稿 PR 并等待真实 CI，由此测量 PRD 的 CI 首次通过率。
+分母只计真正跑过检查的交付；`ci: none`（仓库没有 workflow）与未开启监听都不计入。
+默认跑完关闭 PR 并删除分支，`--ci-cleanup=false` 可保留现场。细节见 `docs/SDD.md` §22.6。
 
 真实 Draft PR / CI 闭环的验证剧本见 `docs/SDD.md` §23；红 CI → 自动修复的首次真实结果见 §23.8，
 沙箱模板在 `bench/sandbox/`。本仓库自身的 CI 定义已启用为 `.github/workflows/ci.yml`

@@ -18,6 +18,10 @@ workspaces/
 *.db-wal
 *.db-shm
 
+# 基准运行产物（--json / --ci-repo 的本地输出）
+bench-ci-result.json
+bench-*.json
+
 # 密钥与环境
 .env
 .env.*

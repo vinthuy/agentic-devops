@@ -237,8 +237,11 @@ func TestCINoneMarksDoneWithExplicitNote(t *testing.T) {
 	f := withDeliveryFixture(t)
 	task := f.task("S")
 	ci := &delivery.FakeCI{Snapshots: []delivery.CISnapshot{{State: delivery.CINone, Summary: "PR 上没有 CI 检查"}}}
+	// 宽限期显式设为极小值：本用例验证的是“确实没有 CI 时如实记录”，
+	// 不是“第一次没看见检查就收尾”。
 	done, err := New(f.st, f.cfg, backend.NewFake([][]backend.ToolCall{good}),
-		WithCodeHost(&delivery.Fake{}), WithCIWatcher(ci), WithCITiming(0, 30*time.Minute)).RunTask(task.ID)
+		WithCodeHost(&delivery.Fake{}), WithCIWatcher(ci), WithCITiming(0, 30*time.Minute),
+		WithCINoneGrace(time.Millisecond)).RunTask(task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +250,35 @@ func TestCINoneMarksDoneWithExplicitNote(t *testing.T) {
 	}
 	if !hasEventWithPayload(t, f.st, task.ID, "state_changed", "ci", "none") {
 		t.Error("应显式记录未运行 CI，而不是静默通过")
+	}
+}
+
+func TestCINoneThenChecksAppearIsNotTreatedAsNoCI(t *testing.T) {
+	// 真实 GitHub 上刚创建的 PR 会短暂返回“no checks reported”，
+	// 与“仓库没有 workflow”输出一致。若第一次就判成无 CI，
+	// 就会把一次尚未开始的 CI 记成完成，CI 首次通过率也随之失真。
+	f := withDeliveryFixture(t)
+	task := f.task("S")
+	ci := &delivery.FakeCI{Snapshots: []delivery.CISnapshot{
+		{State: delivery.CINone, Summary: "PR 上没有 CI 检查"},
+		{State: delivery.CINone, Summary: "PR 上没有 CI 检查"},
+		{State: delivery.CIPending, Summary: "1 项仍在运行", Checks: 1},
+		{State: delivery.CIPassed, Summary: "1 项检查全部通过", Checks: 1},
+	}}
+	done, err := New(f.st, f.cfg, backend.NewFake([][]backend.ToolCall{good}),
+		WithCodeHost(&delivery.Fake{}), WithCIWatcher(ci), WithCITiming(0, 30*time.Minute),
+		WithCINoneGrace(50*time.Millisecond)).RunTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != state.Done {
+		t.Fatalf("应等到 CI 结论，实际 %s", done.Status)
+	}
+	if !hasEventWithPayload(t, f.st, task.ID, "state_changed", "ci", "passed") {
+		t.Error("短暂的空检查不应把最终结论固化成 ci=none")
+	}
+	if ci.Calls < 4 {
+		t.Errorf("应持续轮询直到出现检查，实际只查了 %d 次", ci.Calls)
 	}
 }
 

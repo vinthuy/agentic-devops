@@ -896,6 +896,7 @@ agentic-devops/
 | ADR-27 | 前缀白名单只对**追加参数**做危险标志检查；精确匹配的整条命令视为可信 | 一律只做前缀匹配；或只允许完全相等的命令 | 审核中发现：配置 `go test ./...` 后，`go test ./... -exec <任意程序>` 会被前缀匹配放行，而 `-exec` 的作用正是用指定程序执行测试，等于绕过白名单执行任意代码。若改成只允许完全相等，又会让 `-run TestX` 这类正常用法失效。折中：配置者写下的完整命令可信（他要为该命令负责），追加参数才做 `-exec`/`-toolexec`/`--exec`/`-c` 检查 |
 | ADR-28 | 规划上下文注入需求中点名的文件内容（有界） | 只给文件列表；或把整个仓库塞进上下文 | 重复采样中出现假澄清：需求写明 `status.go`，规划器却要求“提供文件内容”。规划器没有工具，只看到文件列表，因此对“实现结构”类需求容易误判为信息不足。只读需求明确点名的文件（≤3 个、每个 ≤4000 字符、拒绝 `..` 越界），既解决假澄清，也不会让上下文失控 |
 | ADR-29 | 仓库内以 `.gitattributes` 固定 `* text=auto eol=lf` | 在 workflow 里放宽 gofmt 检查；或只在本地格式化 | CI 首次运行即在 Windows runner 上暴露：`core.autocrlf=true` 会把源码检出为 CRLF，`gofmt -l` 于是把 40 个 `.go` 全部列为“未格式化”。这不是代码问题，而是检出配置问题；放宽检查等于删除一道防线。用 `.gitattributes` 让所有平台按 LF 检出，gofmt 结果与平台无关，Windows 也能作为真正的回归环境 |
+| ADR-30 | 「PR 上没有检查」必须持续一个宽限期（默认 `max(2×轮询, 30s)`）才能判定为无 CI | PR 创建后第一次 `gh pr checks` 返回空就收尾 | 把基准集接入真实 CI 时立刻复现：`agentdev bench --ci-repo` 第一次运行报告 `ci: none` 并判 DONE，但同一次 PR 的 CI 在 40 秒后跑完且**通过**。原因是刚创建的 PR 与“仓库没有 workflow”在 `gh` 输出上是同一句话。若立刻收尾，等于把尚未开始的检查当成完成——这正是 ADR-22 想禁止的“未运行被当成通过”，只是换了个更隐蔽的入口、并且会直接污染 CI 首次通过率的分子。宽限期结束后仍无检查才记 `ci: none` |
 
 ---
 
@@ -903,8 +904,8 @@ agentic-devops/
 
 | 项 | 当前状态 / 下一步 |
 |---|---|
-| 真实 GitHub CI 首次通过率 | 目标 ≥50% **仍未测量**。基础设施已就绪（本仓库 workflow 已启用，ubuntu + windows 双绿；沙箱仓库跑通红 CI → 修复）。但 §22 的 20 个基准用例尚未接真实 CI，单条沙箱剧本也确实首次即红（设计使然，不能计入首次通过率） |
-| 基准集规模 | 已建立 `bench/` 与 20 个 S 级用例（Python 10 / Go 7 / JS 3），达到 PRD 样本规模；但重复采样次数仍少，统计上只能算初步数据 |
+| 真实 GitHub CI 首次通过率 | **已测量：20/20 = 100%**（`bench --ci-repo`，§22.6）。口径限制：CI 与本地验证跑同一批命令，因此它度量“环境差异是否让 CI 翻车”，不度量 CI 的额外发现能力（后者见 §23 沙箱剧本） |
+| 基准集规模 | 已建立 `bench/` 与 20 个 S 级用例（Python 10 / Go 7 / JS 3），达到 PRD 样本规模；CI 首次通过率与成功率均为每用例 1 次运行，统计上只能算初步数据 |
 | ~~真实 push/CI 失败修复~~ | **已验证**（§23.8）：`vinthuy/agentdev-sandbox` 上真实触发 `ci_failed → fix_requested(source=ci) → 同一 PR 更新 → 第二次 CI 绿 → DONE`，`ci_attempts=1` |
 | Docker 容器后端 | 可选增强，不是本地开发或 M2 执行的前置条件；只有需要更强隔离时才排期 |
 | ~~Linux 服务器兼容性~~ | **已由 CI 覆盖**：ubuntu-latest 上 gofmt、vet、build 与 18 个包测试全部通过（§23.8）。仍未覆盖其他发行版与容器内运行 |
@@ -1128,11 +1129,11 @@ stateDiagram-v2
 | ~~G-05~~ | ~~`task logs` 命令未实现~~ | AC-34 | **已关闭**：`task logs <id> [--limit N] [--json]`，复用 `report.EventDetail`；`TestTaskLogsShowsTimelineAndJSON` | 已关闭 |
 | ~~G-06~~ | ~~审批时不能修改计划~~ | AC-09 | **已关闭**：`task approve --plan <file>`；计划须通过 `planning.Validate`，且 `allowed_paths` 只能收紧（`vettedPlanFile`/`scopeCovered`）；`TestApproveWithEditedPlan`、`TestVettedPlanFileScopeRules` | 已关闭 |
 | ~~G-07~~ | ~~没有并发任务上限~~ | AC-38 | **已关闭**：`run --parallel M`（上限受 `--max` 约束）；先批量领取任务再分发，`git worktree add/remove` 进程内串行化；每个任务独立后端与输出缓冲；退出码「需要人工」优先 | 已关闭 |
-| G-08 | 真实 CI 首次通过率仍未测量 | 21.6 | **大部分关闭**：20 个 S 级用例、3 个技术栈已建立并可复现运行；支持 `--repeat` 重复采样（见 §22）。剩余：接入真实仓库 CI 才能测 PRD 的 CI 首次通过率 | 高（产品验证） |
+| ~~G-08~~ | ~~真实 CI 首次通过率仍未测量~~ | 21.6 | **已关闭**：`bench --ci-repo` 让基准集在真实仓库上开草稿 PR 并等待真实 CI。20 用例实测 **20/20 = 100%**（`ci_none=0`），平均 $0.00825/次，见 §22.6。注意口径：CI 与本地验证执行同一批命令，因此该指标度量的是“本地通过后 CI 是否因环境差异翻车”，不度量 CI 的额外发现能力 | 已关闭 |
 | ~~G-09~~ | ~~红 CI 自动修复与 CI 首次通过率仍未验证~~ | AC-28、REL-09 | **已关闭（闭环部分）**：真实红 CI → 自动修复 → 同一 PR 更新 → 第二次 CI 绿已验证（§23.8，`t_20261024_9fe5ae`，`ci_attempts=1`，E2E-1…E2E-6 全通过）。仍开放的是**产品指标** CI 首次通过率：需把 §22 基准集接入真实 CI，当前样本为 0 | 已关闭 |
 | ~~G-10~~ | ~~进程崩溃恢复只有计数与状态测试，没有故障注入~~ | AC-37、REL 系列 | **已关闭**：`TestCrashDuringCodingThenResumeCompletes` 真正启动 CLI 子进程，在第 4 次模型调用处阻塞并 kill，再用新进程 resume；断言崩溃后状态仍为 CODING、已写入文件保留、恢复后 DONE 且任务提交恰好 1 个。另有两个状态边界测试覆盖 commit 后崩溃与“无改动仍挂起” | 已关闭 |
 
-> 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试），并新增 AC-07b 覆盖“验收标准本身写错”的归因。基准集已建立并测得 20 个用例 95% 的重复采样成功率（见 §22）；红 CI 自动修复闭环已真实跑通（§23.8）。唯一仍未测量的产品指标是 CI 首次通过率——它要求基准集接入真实 CI，当前样本为 0，不能据此宣称 M1 退出标准全部达成。
+> 结论：41 条功能验收中已无 P0 覆盖缺口（G-01 至 G-05 已关闭并通过测试），并新增 AC-07b 覆盖“验收标准本身写错”的归因。基准集 20 个用例成功率 95%（§22.3）、接入真实 CI 后 CI 首次通过率 20/20（§22.6）；红 CI 自动修复闭环真实跑通（§23.8）。G-08 与 G-09 均已关闭。
 
 ---
 
@@ -1263,8 +1264,81 @@ stateDiagram-v2
 
 - 已扩到 20 个用例、3 个技术栈（Python 10 / Go 7 / JS 3），达到 PRD 的样本规模；但仍是每个用例 1 次运行，统计上只是单样本。
 - 需要多轮采样时用 `--repeat N`：结果按运行次数统计，并按用例给出「通过/运行」，可区分模型波动与真实能力差异。
-- 基准只覆盖本地验证与审查，不含真实 GitHub 推送与 CI；`ci_watch` 路径仍由 FakeCI 与 Runner 替身覆盖，CI 首次通过率仍未测量。
+- 基准默认只覆盖本地验证与审查，不含真实 GitHub 推送与 CI；接入真实 CI 的方式见 §22.6。
 - 用例都是单人小改动，未覆盖跨文件重构、依赖升级、性能与并发缺陷。
+
+### 22.6 接入真实 CI 测首次通过率
+
+```bash
+agentdev bench --manifest bench/tasks.yaml --ci-repo owner/name [--repeat N]
+```
+
+原理：每个用例把自己的 fixture 提交到一个**独占的基线分支** `bench/<case>[-runN]`，
+该分支同时写入一份通用 CI 定义（`.github/workflows/ci.yml`，只监听 `pull_request`），
+并把它当作这个用例的“默认分支”。Agent 的改动照常推到 `agent/*` 并开草稿 PR，
+PR 的 base 就是这条基线分支。因此：
+
+- 用例之间互不可见，仓库默认分支不会被改动；
+- CI 跑的测试入口与本地验证命令一致（Go `go test ./...` / Python `python -m unittest -q` / Node `node --test`），
+  差异只来自环境，不是两边跑的东西不同；
+- `--repeat N` 的第 N 轮用 `bench/<case>-runN`，重复采样之间也不会互相污染。
+
+指标口径（严格按 PRD）：
+
+| 术语 | 定义 |
+|---|---|
+| 分母 `ci_runs` | 交付产生的 PR **真正出现过检查**且拿到结论的次数 |
+| 分子 `ci_first_pass` | 上述次数中，`ci_attempts == 0` 且最终 `ci=passed` 的次数 |
+| `ci_none` | PR 上始终没有检查（没有 workflow）的次数；单独披露，**不进入分母** |
+| `ci_unknown` | 未开启监听、orchestrator 未走到 DONE、CI 查询故障等；不进入分母 |
+
+两条刻意的保守设计：
+
+1. `ci: none` 不等于通过，也不计入分母——否则“没跑过”会变成“跑过了”。
+2. CI 失败后挂起（`NEEDS_HUMAN`）没有 DONE 事件，但它确实跑过并失败，必须记为 `failed` 进入分母，
+   不能退化成 `unknown` 被悄悄排除。
+
+清理：默认 `--ci-cleanup=true`，用例结束后关闭 PR 并删除远端两条分支；
+`gh pr close` 故意不带 `--delete-branch`（该分支被 worktree 占用，gh 删本地分支必然失败），
+远端分支统一由 `git push --delete` 处理。想保留现场时加 `--ci-cleanup=false`。
+
+#### 首次完整测量结果（20 用例 × 1 次，真实 CI）
+
+`agentdev bench --manifest bench/tasks.yaml --ci-repo vinthuy/agentdev-sandbox`
+（私有仓库 [vinthuy/agentdev-sandbox](https://github.com/vinthuy/agentdev-sandbox)，真实 DeepSeek，2026-10-24，耗时约 29 分钟）
+
+| 指标 | 数值 |
+|---|---|
+| 通过 | **20/20 = 100%** |
+| 分级 | 20/20 均为 S |
+| **CI 首次通过率** | **20/20 = 100%** |
+| `ci_none` | 0 |
+| 平均修复 / 审查 / CI 次数 | 0 / 0 / 0 |
+| 平均花费 | $0.00825 |
+| 总花费 | $0.1650 |
+| 平均时长 | 82.5s（含等待 CI，CI 本身约 15s） |
+
+独立核验（保留现场的一次单独运行，`--only js-chunk --ci-cleanup=false`）：
+PR [#25](https://github.com/vinthuy/agentdev-sandbox/pull/25)，Draft、base `bench/js-chunk`、
+改动 1 文件 +1 行、`gh pr checks` 显示 `test pass 15s`
+（run [40088277247](https://github.com/vinthuy/agentdev-sandbox/actions/runs/40088277247)）。
+核验后已关闭 PR 并删除分支。
+
+**如何解读 100%**：这不是“CI 比本地更宽松”，而是两边执行的命令**本来就是同一批**
+（`go test ./...`、`python -m unittest -q`、`node --test`）。因此这个指标现在度量的是
+「本地验证通过后，PR 的第一次 CI 是否会因环境差异翻车」。样本里没有翻车，说明在这三个
+技术栈、这一版 fixture 上，本地验证是 CI 的可靠代理。它**不能**说明 CI 能发现本地发现不了
+的问题——反而是本仓库自己给出了反例：首跑 CI 时 Windows runner 的 CRLF 检出让 `gofmt` 全线报错，
+而这在本地永远看不到（ADR-29）。
+
+**这条指标现在的价值边界**：
+
+- 能回答：交付到真实 GitHub 后，第一次 CI 是否会因为环境、依赖或工作流配置而失败；
+- 不能回答：CI 是否比本地验证更强（这需要 CI 里跑本地不跑的检查，例如 `bench/sandbox/` 那种剧本）；
+- 样本仍是 1 次/用例；要谈统计显著性需要 `--repeat`。
+
+**没有 CI 与未知都不进分母**：本仓库早期的 PR #1（`agentic-devops`）就是 `ci: none`，
+它不会被算成“首次通过”，也不会拉低比率——这正是 §23.7 想避免的那种失真。
 
 ---
 
