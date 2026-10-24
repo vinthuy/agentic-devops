@@ -1,0 +1,11 @@
+# 统一用 LF 检出：gofmt 只接受 LF，而 GitHub 的 Windows runner 默认
+# core.autocrlf=true 会把源码转成 CRLF，导致 gofmt -l 把所有文件都列为未格式化。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.db binary
+*.sqlite binary
