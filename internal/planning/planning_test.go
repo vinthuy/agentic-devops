@@ -125,6 +125,49 @@ func TestModelPlannerParsesForcedToolCall(t *testing.T) {
 	}
 }
 
+// 需求声称“缺失”且现有测试已有同名引用时，证据必须真的进入提示：规划器看不到仓库，
+// 没有文件内容就无法判断既有断言覆盖了什么，只能退回“产出一份新测试”。
+func TestModelPlannerIncludesExistingCoverageEvidence(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		// Go 的 json 编码会把 < > 转义成 \u003c，这里还原后再断言提示内容。
+		var req struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &req); err == nil && len(req.Messages) > 0 {
+			body = req.Messages[0].Content
+		}
+		io.WriteString(w, `{
+			"content": [{"type":"tool_use","id":"t1","name":"submit_plan","input":{
+				"status":"needs_info","summary":"前提不成立",
+				"questions":["cost_test.go:12 已覆盖缓存计价，请确认增量"],
+				"acceptance":[]
+			}}],
+			"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}
+		}`)
+	}))
+	defer srv.Close()
+
+	p := &ModelPlanner{Client: llm.NewClient(srv.URL, "k"), Model: "m", MaxTokens: 10}
+	_, err := p.Plan(context.Background(), Requirement{
+		Text:             "为 Table.Cost 补充缓存计价测试",
+		VerifyNames:      []string{"test"},
+		ExistingCoverage: []CoverageHit{{Identifier: "Table.Cost", File: "internal/cost/cost_test.go", Line: 12}},
+		CoverageFiles:    map[string]string{"internal/cost/cost_test.go": "usd, ok := tbl.Cost(\"m\", u)\n"},
+	})
+	if err != nil {
+		t.Fatalf("规划失败: %v", err)
+	}
+	for _, want := range []string{"<existing_coverage", "internal/cost/cost_test.go:12", "tbl.Cost"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("提示中缺少 %q，规划器无法判断前提是否成立", want)
+		}
+	}
+}
+
 func TestModelPlannerRejectsInvalidPlan(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{

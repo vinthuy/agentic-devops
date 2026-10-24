@@ -225,6 +225,11 @@ type Requirement struct {
 	RepoSummary string
 	// FileSnippets 是需求中点名的文件内容，用于避免“请提供文件内容”的假澄清。
 	FileSnippets map[string]string
+	// ExistingCoverage 是需求所称“缺失”的标识符在现有测试中的命中位置。
+	// 用于让规划器判断需求前提是否成立，避免产出与既有断言重复的改动。
+	ExistingCoverage []CoverageHit
+	// CoverageFiles 是上述命中文件的内容。没有内容，规划器无法判断已有断言覆盖了什么。
+	CoverageFiles map[string]string
 }
 
 // Planner 生成实施计划。
@@ -274,6 +279,25 @@ func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) 
 			fmt.Fprintf(&b, "<file path=\"%s\">\n%s\n</file>\n", path, req.FileSnippets[path])
 		}
 		b.WriteString("</mentioned_files>")
+	}
+
+	if len(req.ExistingCoverage) > 0 {
+		b.WriteString("\n<existing_coverage trusted=\"true\">\n")
+		b.WriteString("需求声称缺失或被覆盖不足的标识符，在现有测试文件中已有引用：\n")
+		for _, h := range req.ExistingCoverage {
+			fmt.Fprintf(&b, "- %s → %s:%d\n", h.Identifier, h.File, h.Line)
+		}
+		if len(req.CoverageFiles) > 0 {
+			paths := make([]string, 0, len(req.CoverageFiles))
+			for path := range req.CoverageFiles {
+				paths = append(paths, path)
+			}
+			sort.Strings(paths)
+			for _, path := range paths {
+				fmt.Fprintf(&b, "<file path=\"%s\">\n%s\n</file>\n", path, req.CoverageFiles[path])
+			}
+		}
+		b.WriteString("</existing_coverage>")
 	}
 
 	resp, input, err := p.Client.CallTool(ctx, llm.Request{

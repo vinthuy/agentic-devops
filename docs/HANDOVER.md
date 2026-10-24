@@ -27,7 +27,7 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 | 项目 | 证据 |
 |---|---|
 | 构建与静态检查 | `gofmt -l .` 无输出；`go build ./...`、`go vet ./...` 通过 |
-| 测试 | 224 个测试函数，18 个包全部通过 |
+| 测试 | 231 个测试函数，18 个包全部通过 |
 | 真实模型端到端 | DeepSeek 完成 邮箱/slug/CSV/字典 等任务，Reviewer 返回 approve |
 | 基准集 | 20 个 S 级用例（Python 10 / Go 7 / JS 3），修复前均确认失败；重复采样 38/40 = 95%，平均 $0.0105/次 |
 | 崩溃恢复 | 真实子进程在模型调用中途被 kill，重启后完成且只产生 1 个提交 |
@@ -40,12 +40,14 @@ agentdev bench --manifest bench/tasks.yaml --repeat 2
 | **本仓库 CI（双 OS）** | `.github/workflows/ci.yml` 已启用：run [40083639699](https://github.com/vinthuy/agentic-devops/actions/runs/40083639699) 的 `test (ubuntu-latest)`、`test (windows-latest)`、`benchmark manifest` 全绿。18 个包在 Linux 上全部通过 |
 | CI 首跑发现的问题 | Windows runner 以 CRLF 检出导致 `gofmt -l` 误报全部 40 个 `.go`；加 `.gitattributes`（`* text=auto eol=lf`）后修复（ADR-29） |
 | **CI 首次通过率（PRD ≥50%）** | `bench --ci-repo vinthuy/agentdev-sandbox` 让 20 个基准用例各开一个真实草稿 PR 并等待真实 CI：**20/20 = 100%**，`ci_none=0`，平均 $0.00825/次，总 $0.165（SDD §22.6）。口径：CI 与本地验证跑同一批命令 |
+| **需求前提核查** | 需求声称“某测试缺失/需补充”时，规划前在测试文件里查同名引用，并把命中位置与文件内容注入规划器（ADR-31）。用 PR #1 的原始需求实测：24 秒、$0.0057 停在 `NEEDS_INFO`，明确指出 `cost_test.go:12-14` 已覆盖；无证据注入的版本会产出重复测试（$0.0190） |
 
 ## 3. 未验证（重要）
 
 | 项目 | 原因 | 需要什么 |
 |---|---|---|
 | 基准统计显著性 | 20 用例 × 1 次运行（成功率与 CI 首次通过率都是单样本） | `--repeat N` 多轮采样，或更多仓库 |
+| 前提核查的覆盖面 | 只覆盖“测试缺失/需补充”这类主张，且依赖关键词触发；非测试类前提（“某函数没处理 X”）仍不核查 | 需要模型驱动的只读检索工具，或更多触发表述 |
 | CI 的额外发现能力 | 基准里 CI 与本地验证跑同一批命令，因此 100% 只说明“环境没有翻车” | 像 `bench/sandbox/` 那样让 CI 跑本地不跑的检查，再统计 |
 | 非 ubuntu 的 Linux 发行版 | 仅覆盖 `ubuntu-latest` | 目标发行版或容器内复跑 |
 | Docker 隔离 | 你已明确不作为需求；默认使用受限本地进程 | 仅在需要 OS 级隔离时再排期 |

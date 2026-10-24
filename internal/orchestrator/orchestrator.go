@@ -327,6 +327,7 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 
 // planStep 生成结构化计划。需求不清时进入 NEEDS_INFO；M 级任务进入 AWAITING_APPROVAL。
 func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.Task, error) {
+	coverage := planning.ExistingCoverage(task.Requirement, repo.LocalPath, 8)
 	req := planning.Requirement{
 		TaskID:       task.ID,
 		Source:       task.Source,
@@ -336,6 +337,10 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 		Commands:     commandMap(repo),
 		RepoSummary:  repoSummary(repo.LocalPath),
 		FileSnippets: planning.MentionedFiles(task.Requirement, repo.LocalPath, 3, 4000),
+		// 需求声称“缺失”时，先查现有测试是否已有同名覆盖，避免产出重复改动。
+		// 证据包含命中文件的内容：只给行号，规划器无法判断既有断言覆盖了什么。
+		ExistingCoverage: coverage,
+		CoverageFiles:    planning.CoverageSnippets(repo.LocalPath, coverage, 2, 4000),
 	}
 
 	planner := o.planner
