@@ -29,10 +29,11 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 | 项目 | 证据 |
 |---|---|
 | 构建与静态检查 | `gofmt -l .` 无输出；`go build ./...`、`go vet ./...` 通过 |
-| 测试 | 280 个顶层测试函数（含子测试共 314 条 PASS），19 个含测试的包全部 `ok`（共 21 个包，另 2 个无测试文件） |
+| 测试 | 298 个顶层测试函数（含子测试共 336 条 PASS），19 个含测试的包全部 `ok`（共 21 个包，另 2 个无测试文件） |
 | 真实模型端到端 | DeepSeek 完成 邮箱/slug/CSV/字典 等任务，Reviewer 返回 approve |
 | 基准集 | 24 个用例（S 级 20：Python 10 / Go 7 / JS 3；M 级 4）：修复前均确认失败。S 级重复采样 38/40 = 95%，平均 $0.0105/次；ADR-31 回归轮 20/20、ADR-33 回归轮 20/20（均 $0.0095/次，SDD §22.3）。M 级 4/4 通过（合成审批，$0.0080～$0.0205，SDD §22.7），其中 `py-session-refresh` 是唯一**跨两文件**改动，真实模型同时改对 `clock.py` 与 `session.py` |
-| **审批门（放行 / 驳回 / 回退）** | 真实 DeepSeek 端到端（SDD §22.8，ADR-39）：M 级任务停在 `AWAITING_APPROVAL` 且后端未被调用；`task reject --reason`（含 `--by`）→ `REJECTED`，工作区一个字节未改、任务不再被取走；`task reject --replan` → 回 `PLANNING`，重新规划后**再次**停在审批门；`task approve` → `DONE`，提交 `bd7f6d4` 真把 `a - b` 改成 `a + b`，`main` 未动。驳回理由确实进了规划器（新计划摘要吸收了「确认 test_core.py 的期望」）。**审批超时尚未实现** |
+| **审批门（放行 / 驳回 / 回退）** | 真实 DeepSeek 端到端（SDD §22.8，ADR-39）：M 级任务停在 `AWAITING_APPROVAL` 且后端未被调用；`task reject --reason`（含 `--by`）→ `REJECTED`，工作区一个字节未改、任务不再被取走；`task reject --replan` → 回 `PLANNING`，重新规划后**再次**停在审批门；`task approve` → `DONE`，提交 `bd7f6d4` 真把 `a - b` 改成 `a + b`，`main` 未动。驳回理由确实进了规划器（新计划摘要吸收了「确认 test_core.py 的期望」） |
+| **审批超时** | ADR-40：超时升级到 `NEEDS_HUMAN`（不自动放行/驳回），`resume` 可送回审批门并重新计时；7 个确定性测试覆盖（`TestRunEscalatesStaleApproval` 等），时钟通过回拨 `updated_at` 模拟，不 sleep |
 | 崩溃恢复 | 真实子进程在模型调用中途被 kill，重启后完成且只产生 1 个提交 |
 | 策略 | 路径穿越、符号链接逃逸、敏感路径、危险命令、`-exec` 类追加参数均被拒绝 |
 | 成本 | 逐次模型调用记账、80% 预警、100% 熔断；缺单价显式告警 |
@@ -63,10 +64,9 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 
 - 本地进程不是 OS 级沙箱：限制来自 worktree、路径/命令策略、超时与密钥扫描，不是内核隔离。
 - Reviewer 判断质量依赖模型；只在四类问题（需求/正确性/安全/验证削弱）上阻塞，风格意见不阻塞。
-- 审批门**不会超时**：任务停在 `AWAITING_APPROVAL` 不会自动升级或失效，只能靠人看
-  `task list` 的 `等待` 列。没有直接加自动超时，因为「超时后该怎样」是策略问题
-  （自动放行不可接受、自动驳回会丢掉可用计划且与人工否决混为一谈、升级到
-  `NEEDS_HUMAN` 只是换成另一种挂起），需要先确认期望行为（SDD §22.8）。
+- 审批门**默认不会超时**：`approval_timeout_minutes` 默认为 0（一直等）。开启后超时只升级到
+  `NEEDS_HUMAN`（`resume` 可送回审批门），不会自动放行或自动驳回；需要自行定时跑
+  `agentdev run` 或任何会调 `run` 的命令来触发检查（没有常驻的清理进程）。
 - 规划器可能写出不可执行的验收标准（错误选择器、过窄 grep）。系统会识别并回到规划一次，仍失败则转人工，但会消耗时间与少量费用。
 - 规划器还可能写出**把实现写法钉死**的验收标准（断言 `x = now()` 这类赋值右侧）。这类断言不会触发「不可执行」，而是让一个语义正确的实现失败、白跑一轮修复（SDD §22.7 有实测）。已在规划提示词里加了具体反例，但**只能靠模型遵守，无法用测试钉住**：计划校验硬拒会降级成静态计划，判成 `Invalid` 又会把可用例推向转人工（ADR-38）。
 - `locks` 表为多进程部署预留，当前单进程实现不使用。
@@ -80,6 +80,10 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
     `→ CODING` 一条出边，CLI 也只有 `task approve`——「审批」实际退化成「通知」。
     新增 `task reject --reason R`（终止，`REJECTED`）与 `task reject --reason R --replan`
     （退回 `PLANNING` 重做，理由并入需求）。`--reason` 必填。
+  - **审批超时升级**（§22.8，ADR-40）：`policy.yaml` 新增 `approval_timeout_minutes`
+    （默认 0 = 不超时）。超过阈值升级到 `NEEDS_HUMAN` 并记录 `approval_timeout` 事件，
+    **不自动放行也不自动驳回**；`task resume` 可把它送回审批门并重新计时
+    （为此单独放开 `NEEDS_HUMAN → AWAITING_APPROVAL` 这条边）。
   - **审批门可见性**：`approved_by` 此前只写进事件负载、任何渲染路径都不读，
     现在时间线显示「审批人/驳回人」；`task list` 增加 `等待` 列，挂起任务的
     等待时长可见。

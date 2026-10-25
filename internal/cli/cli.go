@@ -1426,6 +1426,15 @@ func runCmd(opts *options) *cobra.Command {
 
 			out := cmd.OutOrStdout()
 
+			// 停在审批门的任务不在 RunnableStatuses 里，不会被下面取到。
+			// 因此超时升级必须在选任务之前做一次，否则等太久的任务永远停在原地。
+			// 它只需要 store 和策略，不需要后端，所以放在构造后端之前。
+			if n, xerr := orchestrator.ExpireApprovals(st, cfg); xerr != nil {
+				return xerr
+			} else if n > 0 {
+				fmt.Fprintf(out, "审批超时：%d 个任务已升级为 NEEDS_HUMAN（可用 task resume 送回审批门）\n", n)
+			}
+
 			// 先确认有活可干，再构造后端：没有任务时不应因为缺少 API key 而失败。
 			if taskID != "" {
 				if _, err := st.GetTask(taskID); err != nil {

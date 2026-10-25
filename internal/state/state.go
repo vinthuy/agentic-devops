@@ -97,6 +97,10 @@ func resumable() map[Status]bool {
 			out[s] = true
 		}
 	}
+	// 审批门是挂起状态里的例外：审批超时会把任务升级到 NEEDS_HUMAN，
+	// resume 需要能把它送回审批门继续等人。NeedsInfo 不走这条路（它有自己的 reply），
+	// 所以只放开 AwaitingApproval，而不是把整个 Suspended 都塞进 resumable。
+	out[AwaitingApproval] = true
 	return out
 }
 

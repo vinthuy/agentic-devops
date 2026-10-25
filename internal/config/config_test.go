@@ -137,6 +137,38 @@ func TestValidateRejectsEmptyVerifyAndBadBudget(t *testing.T) {
 	}
 }
 
+func TestApprovalTimeoutConfig(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, "repos.yaml", "repos:\n  acme/app:\n    local_path: /tmp/app\n    verify_commands:\n      test: \"true\"\n")
+	writeFile(t, home, "policy.yaml", "approval_timeout_minutes: 90\n")
+	cfg, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Policy.ApprovalTimeoutMinutes != 90 {
+		t.Fatalf("应读到 90，实际 %d", cfg.Policy.ApprovalTimeoutMinutes)
+	}
+
+	// 默认必须是 0：审批门默认不会自己失效。
+	empty := t.TempDir()
+	writeFile(t, empty, "repos.yaml", "repos:\n  acme/app:\n    local_path: /tmp/app\n    verify_commands:\n      test: \"true\"\n")
+	cfg, err = Load(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Policy.ApprovalTimeoutMinutes != 0 {
+		t.Errorf("默认应为 0（不超时），实际 %d", cfg.Policy.ApprovalTimeoutMinutes)
+	}
+
+	// 负数没有意义：既不是「不超时」也不是一个时长。
+	bad := t.TempDir()
+	writeFile(t, bad, "repos.yaml", "repos:\n  acme/app:\n    local_path: /tmp/app\n    verify_commands:\n      test: \"true\"\n")
+	writeFile(t, bad, "policy.yaml", "approval_timeout_minutes: -5\n")
+	if _, err := Load(bad); err == nil || !strings.Contains(err.Error(), "approval_timeout_minutes") {
+		t.Errorf("负数应被拒绝，实际 %v", err)
+	}
+}
+
 func TestDeliveryEnabledKeepsDefaults(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, home, "config.yaml", "delivery:\n  enabled: true\n")

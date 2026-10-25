@@ -65,6 +65,10 @@ type PolicyConfig struct {
 	ToolOutputMaxChars int `yaml:"tool_output_max_chars"`
 	CommandTimeoutS    int `yaml:"command_timeout_s"`
 	TaskTimeoutMinutes int `yaml:"task_timeout_minutes"`
+	// ApprovalTimeoutMinutes 是 M 级任务停在审批门的容忍时长（分钟），0 表示不超时。
+	// 超时后升级到 NEEDS_HUMAN 而不是自动放行或自动驳回：审批门的全部意义就是
+	// 等人判断，自动放行等于拆门；自动驳回会把「没人看」和「人否决」混成一个终态。
+	ApprovalTimeoutMinutes int `yaml:"approval_timeout_minutes"`
 }
 
 type ModelsConfig struct {
@@ -318,6 +322,9 @@ func (a *App) Validate() error {
 	}
 	if a.Policy.MaxReviewAttempts < 0 {
 		problems = append(problems, "max_review_attempts 不能为负数")
+	}
+	if a.Policy.ApprovalTimeoutMinutes < 0 {
+		problems = append(problems, "approval_timeout_minutes 不能为负数（0 表示不超时）")
 	}
 	if a.Delivery.MaxCIAttempts < 0 {
 		problems = append(problems, "delivery.max_ci_attempts 不能为负数")

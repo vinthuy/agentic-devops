@@ -153,6 +153,23 @@ func (o *Orchestrator) RunTask(taskID string) (store.Task, error) {
 	if err != nil {
 		return store.Task{}, err
 	}
+	// 审批超时要在「是否可推进」之前处理：停在审批门的任务本身不可推进，
+	// 但如果先返回「无法推进」，等太久的任务就永远不会被升级。
+	if task.Status == state.AwaitingApproval && o.cfg.Policy.ApprovalTimeoutMinutes > 0 {
+		if _, err := expireApprovals(o.store, o.cfg, time.Now()); err != nil {
+			return task, err
+		}
+		task, err = o.store.GetTask(taskID)
+		if err != nil {
+			return store.Task{}, err
+		}
+		if task.Status != state.AwaitingApproval {
+			if _, rerr := report.WriteRunArtifacts(o.store, o.cfg, taskID); rerr != nil {
+				return task, fmt.Errorf("写入运行报告失败: %w", rerr)
+			}
+			return task, nil
+		}
+	}
 	if !runnableStatus(task.Status) {
 		return task, fmt.Errorf("任务 %s 当前状态为 %s，无法推进", taskID, task.Status)
 	}
@@ -185,6 +202,52 @@ func runnableStatus(s state.Status) bool {
 		}
 	}
 	return false
+}
+
+// ExpireApprovals 把在审批门等太久的 M 级任务升级到 NEEDS_HUMAN。
+//
+// 只升级、不自动放行也不自动驳回（ADR-40）：自动放行等于拆掉审批门；自动驳回会
+// 把「没人看」和「人否决」混成同一个 REJECTED，审计上再也分不开，而且丢掉一份
+// 可能可用的计划。升级到 NEEDS_HUMAN 保留计划，`task resume` 能把任务送回审批门，
+// 于是「没人看」变成一件显式可见、可回退的事。
+//
+// 做成包级函数是刻意的：升级只需要 store 和一条策略，不需要后端或模型。
+// CLI 因此可以在「先确认有活可干、再构造后端」之前就把它做掉。
+func ExpireApprovals(st store.Repository, cfg *config.App) (int, error) {
+	return expireApprovals(st, cfg, time.Now())
+}
+
+func expireApprovals(st store.Repository, cfg *config.App, now time.Time) (int, error) {
+	minutes := cfg.Policy.ApprovalTimeoutMinutes
+	if minutes <= 0 {
+		return 0, nil
+	}
+	tasks, err := st.ListTasks(state.AwaitingApproval, "")
+	if err != nil {
+		return 0, err
+	}
+	expired := 0
+	for _, t := range tasks {
+		since, perr := time.Parse(time.RFC3339, t.UpdatedAt)
+		if perr != nil {
+			// 时间戳坏了就当作不超时：宁可让人多看一会儿，也不要因为解析失败
+			// 把一个正常等待中的任务升级掉。
+			continue
+		}
+		waited := now.Sub(since)
+		if waited <= time.Duration(minutes)*time.Minute {
+			continue
+		}
+		if _, terr := st.Transition(t.ID, t.Version, state.NeedsHuman, map[string]any{
+			"reason": fmt.Sprintf("审批超时：等了 %d 分钟（上限 %d），已升级为待人工处理",
+				int(waited.Minutes()), minutes),
+			"cause": "approval_timeout",
+		}, nil); terr != nil {
+			return expired, terr
+		}
+		expired++
+	}
+	return expired, nil
 }
 
 // drive 是状态机主循环：按当前状态执行一步，直到进入终态或挂起态。
