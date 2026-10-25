@@ -1,4 +1,4 @@
-# 交接说明（v0.11.0）
+# 交接说明（v0.12.0）
 
 本文件记录当前版本**已验证**与**未验证**的边界，避免把单元测试通过当成线上可用。
 设计依据见 `docs/PRD.md`、`docs/SDD.md`；验收矩阵在 SDD §21。
@@ -74,16 +74,19 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 
 ## 5. 版本基线
 
-- 代码版本：`v0.11.0`（`internal/cli.Version`）
+- 代码版本：`v0.12.0`（`internal/cli.Version`）
+- `v0.12.0` 相对 `v0.11.0` 的实质变化：
+  - **审批超时升级**（§22.8，ADR-40）：`policy.yaml` 新增 `approval_timeout_minutes`
+    （默认 0 = 不超时）。超过阈值升级到 `NEEDS_HUMAN` 并记录 `approval_timeout` 事件，
+    **不自动放行也不自动驳回**；`task resume` 可把它送回审批门并重新计时
+    （为此单独放开 `NEEDS_HUMAN → AWAITING_APPROVAL` 这条边）。
+    注意：检查是在 `run` 入口与 `RunTask` 里做的，没有常驻清理进程——不跑 `run`
+    就不会触发。
 - `v0.11.0` 相对 `v0.10.0` 的实质变化：
   - **补上审批门的拒绝分支**（§22.8，ADR-39）：`AwaitingApproval` 此前只有
     `→ CODING` 一条出边，CLI 也只有 `task approve`——「审批」实际退化成「通知」。
     新增 `task reject --reason R`（终止，`REJECTED`）与 `task reject --reason R --replan`
     （退回 `PLANNING` 重做，理由并入需求）。`--reason` 必填。
-  - **审批超时升级**（§22.8，ADR-40）：`policy.yaml` 新增 `approval_timeout_minutes`
-    （默认 0 = 不超时）。超过阈值升级到 `NEEDS_HUMAN` 并记录 `approval_timeout` 事件，
-    **不自动放行也不自动驳回**；`task resume` 可把它送回审批门并重新计时
-    （为此单独放开 `NEEDS_HUMAN → AWAITING_APPROVAL` 这条边）。
   - **审批门可见性**：`approved_by` 此前只写进事件负载、任何渲染路径都不读，
     现在时间线显示「审批人/驳回人」；`task list` 增加 `等待` 列，挂起任务的
     等待时长可见。
