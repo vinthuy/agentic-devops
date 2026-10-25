@@ -29,7 +29,7 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 | 项目 | 证据 |
 |---|---|
 | 构建与静态检查 | `gofmt -l .` 无输出；`go build ./...`、`go vet ./...` 通过 |
-| 测试 | 298 个顶层测试函数（含子测试共 336 条 PASS），19 个含测试的包全部 `ok`（共 21 个包，另 2 个无测试文件） |
+| 测试 | 310 个顶层测试函数（含子测试共 352 条 PASS），19 个含测试的包全部 `ok`（共 21 个包，另 2 个无测试文件） |
 | 真实模型端到端 | DeepSeek 完成 邮箱/slug/CSV/字典 等任务，Reviewer 返回 approve |
 | 基准集 | 24 个用例（S 级 20：Python 10 / Go 7 / JS 3；M 级 4）：修复前均确认失败。S 级重复采样 38/40 = 95%，平均 $0.0105/次；ADR-31 回归轮 20/20、ADR-33 回归轮 20/20（均 $0.0095/次，SDD §22.3）。M 级 4/4 通过（合成审批，$0.0080～$0.0205，SDD §22.7），其中 `py-session-refresh` 是唯一**跨两文件**改动，真实模型同时改对 `clock.py` 与 `session.py` |
 | **审批门（放行 / 驳回 / 回退）** | 真实 DeepSeek 端到端（SDD §22.8，ADR-39）：M 级任务停在 `AWAITING_APPROVAL` 且后端未被调用；`task reject --reason`（含 `--by`）→ `REJECTED`，工作区一个字节未改、任务不再被取走；`task reject --replan` → 回 `PLANNING`，重新规划后**再次**停在审批门；`task approve` → `DONE`，提交 `bd7f6d4` 真把 `a - b` 改成 `a + b`，`main` 未动。驳回理由确实进了规划器（新计划摘要吸收了「确认 test_core.py 的期望」） |
