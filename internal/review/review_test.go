@@ -149,6 +149,7 @@ func TestModelReviewerParsesStructuredToolCall(t *testing.T) {
 		Plan:        "修改 validators.py",
 		Diff:        "diff --git a/validators.py b/validators.py\n--- a/validators.py\n+++ b/validators.py\n+_EMAIL = ...",
 		Acceptance:  "[ac1] 满足",
+		CIFailure:   "CI 失败：1 项检查失败（test）\n\nAssertionError: ValueError not raised",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -159,9 +160,12 @@ func TestModelReviewerParsesStructuredToolCall(t *testing.T) {
 	if reported.InputTokens != 50 || reported.OutputTokens != 20 {
 		t.Errorf("用量未上报: %+v", reported)
 	}
-	for _, tag := range []string{"<task_requirement", "<plan", "<acceptance_results", "<diff"} {
+	for _, tag := range []string{"<task_requirement", "<plan", "<acceptance_results", "<ci_failure", "<diff"} {
 		if !strings.Contains(seenUserContent, tag) {
 			t.Errorf("用户消息缺少 %s: %q", tag, seenUserContent)
 		}
+	}
+	if !strings.Contains(seenUserContent, "ValueError not raised") {
+		t.Errorf("CI 失败输出未进入上下文: %q", seenUserContent)
 	}
 }

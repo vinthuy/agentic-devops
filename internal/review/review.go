@@ -123,6 +123,13 @@ type Input struct {
 	Plan        string
 	Diff        string
 	Acceptance  string
+	// CIFailure 是本轮改动要解决的 CI 失败输出（来自真实 CI，非模型推断）。
+	//
+	// 它是需求的**客观延伸**：检查已经失败，说明某条行为确实不被接受。
+	// 不传这个字段时，审查者只看到需求与 diff，会把「为满足失败检查而加的
+	// 入参校验」判成超范围的画蛇添足，进而要求回退——那会把唯一能让 CI 变绿
+	// 的改动撤掉，任务必然转人工。
+	CIFailure string
 }
 
 // Reviewer 审查一次改动。
@@ -160,6 +167,9 @@ func (m *ModelReviewer) Review(ctx context.Context, in Input) (Review, error) {
 	}
 	if in.Acceptance != "" {
 		fmt.Fprintf(&b, "<acceptance_results trusted=\"true\">\n%s\n</acceptance_results>\n\n", in.Acceptance)
+	}
+	if in.CIFailure != "" {
+		fmt.Fprintf(&b, "<ci_failure trusted=\"true\">\n%s\n</ci_failure>\n\n", in.CIFailure)
 	}
 	fmt.Fprintf(&b, "<diff trusted=\"false\">\n%s\n</diff>", clampMiddle(in.Diff, maxDiffChars))
 

@@ -1,4 +1,4 @@
-# 交接说明（v0.7.0）
+# 交接说明（v0.8.0）
 
 本文件记录当前版本**已验证**与**未验证**的边界，避免把单元测试通过当成线上可用。
 设计依据见 `docs/PRD.md`、`docs/SDD.md`；验收矩阵在 SDD §21。
@@ -29,7 +29,7 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 | 项目 | 证据 |
 |---|---|
 | 构建与静态检查 | `gofmt -l .` 无输出；`go build ./...`、`go vet ./...` 通过 |
-| 测试 | 289 个测试函数，19 个含测试的包全部 `ok`（共 21 个包，另 2 个无测试文件） |
+| 测试 | 278 个顶层测试函数（含子测试共 312 条 PASS），19 个含测试的包全部 `ok`（共 21 个包，另 2 个无测试文件） |
 | 真实模型端到端 | DeepSeek 完成 邮箱/slug/CSV/字典 等任务，Reviewer 返回 approve |
 | 基准集 | 20 个 S 级用例（Python 10 / Go 7 / JS 3），修复前均确认失败；重复采样 38/40 = 95%，平均 $0.0105/次；ADR-31 回归轮 20/20 = 100%（$0.0095/次）；ADR-33 回归轮 20/20 = 100%（$0.0095/次，SDD §22.3） |
 | 崩溃恢复 | 真实子进程在模型调用中途被 kill，重启后完成且只产生 1 个提交 |
@@ -38,7 +38,7 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 | 真实 Draft PR | 在本仓库上跑通：PR #1（后因需求前提不成立而关闭，见 SDD §18），仅改目标文件、Draft、正文含验收矩阵与成本、Reviewer approve、`master` 未被改动 |
 | 无 CI 时的处理 | `gh pr checks` 无检查时记录 `ci: none` 后完成，不伪装成通过 |
 | 交付（CI 回修） | 密钥扫描、分支推送、幂等 PR 更新由 Fake/替身覆盖；红 CI 回修已在真实仓库验证（见下条） |
-| **红 CI → 自动修复闭环** | `vinthuy/agentdev-sandbox` 上真实跑通：首次 CI 失败（`test_edges.py` 的 None/bool 边界）→ `fix_requested{source: ci}` 携带 CI 日志尾部 → 回修 → **同一个 PR 更新**（沙箱仓库的 PR #1，与本仓库的 PR #1 无关）→ 第二次 CI 绿 → `DONE`，`ci_attempts=1`，$0.0267。E2E-1…E2E-6 全部通过（SDD §23.8） |
+| **红 CI → 自动修复闭环** | `vinthuy/agentdev-sandbox` 上真实跑通并**扩样到 6 次**（SDD §23.9）：首次 CI 失败（`test_edges.py` 的 None/bool 边界）→ `fix_requested{source: ci}` 携带 CI 日志尾部 → 回修 → **同一个 PR 更新** → 第二次 CI 绿 → `DONE`，每次 `ci_attempts=1`。剧本（`bench/ci_loop.yaml`）在 v0.7.0 上只有 2/6 走通，暴露两个链路缺陷（日志按头部截断、Reviewer 要求回退 CI 要求的改动）；修复后 6/6，平均 $0.0212 |
 | **本仓库 CI（双 OS）** | `.github/workflows/ci.yml` 已启用：run [40083639699](https://github.com/vinthuy/agentic-devops/actions/runs/40083639699) 的 `test (ubuntu-latest)`、`test (windows-latest)`、`benchmark manifest` 全绿。18 个包在 Linux 上全部通过 |
 | CI 首跑发现的问题 | Windows runner 以 CRLF 检出导致 `gofmt -l` 误报全部 40 个 `.go`；加 `.gitattributes`（`* text=auto eol=lf`）后修复（ADR-29） |
 | **CI 首次通过率（PRD ≥50%）** | `bench --ci-repo vinthuy/agentdev-sandbox` 让 20 个基准用例各开一个真实草稿 PR 并等待真实 CI：**20/20 = 100%**，`ci_none=0`，平均 $0.00825/次，总 $0.165（SDD §22.6）。口径：CI 与本地验证跑同一批命令 |
@@ -68,7 +68,20 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 
 ## 5. 版本基线
 
-- 代码版本：`v0.7.0`（`internal/cli.Version`）
+- 代码版本：`v0.8.0`（`internal/cli.Version`）
+- `v0.8.0` 相对 `v0.7.0` 的实质变化：
+  - **红 CI 闭环从 N=1 扩到 6 次重复运行**（§23.9，新增 `bench/ci_loop.yaml` 与
+    `bench/ci_loop_workflow.yml`）。扩样把通过率从 2/6 拉到 **6/6**，代价是暴露两个
+    与模型能力无关的链路缺陷：
+  - CI 失败文本改为**保留日志尾部**（预算 4000 字符）。原先按头部截断，GitHub Actions
+    的 workflow 样板把断言挤掉，编码步骤因此判定「代码已正确、无需修改」（ADR-34）
+  - 审查上下文新增 `<ci_failure trusted="true">`：当本轮改动在修 CI 失败时注入那次失败，
+    Reviewer 不再把 CI 要求的改动判成「超范围」并回退（ADR-34）
+  - `git push` 对传输层抖动重试 3 次，认证/权限/分支保护等错误立即失败（ADR-35）
+  - 基准测量：基础设施故障的运行标记 `blocked` 并排除出成功率分母（ADR-36）；
+    基线分支改为强制推送，避免崩溃残留的远端分支阻断后续运行
+  - 新增 `internal/delivery/network_retry_test.go`、`internal/orchestrator/ci_evidence_test.go`、
+    `internal/orchestrator/ci_failure_text_test.go`、`internal/bench/infra_blocked_test.go`
 - `v0.7.0` 相对 `v0.6.0` 的实质变化：
   - 前提核查扩展到**现有实现主张**（ADR-33）：需求说“某函数没处理 X”“改为 Y”时，
     规划前在非测试源码里定位被点名符号，注入定义位置与带行号的代码窗口。
@@ -96,7 +109,10 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
   `ci/github-workflow.yml.template` 保留作为分发模板，内容与启用后的文件一致。
 - 推送 `.github/workflows/*` 需要 `gh` 令牌具备 `workflow` scope：
   `gh auth refresh -h github.com -s workflow`。
-- 回退方式：`git checkout v0.7.0`。
+- 回退方式：`git checkout v0.8.0`。
+  **不要回退到 v0.7.0 以下**：会丢掉 CI 失败日志的尾部保留与审查上下文注入（ADR-34），
+  红 CI 闭环会从 6/6 掉回 2/6——失败的形态是「编码步骤说无需修改」或「Reviewer 要求
+  回退 CI 要求的改动」，两者都不会报错，只会悄悄转人工。
   **不要回退到 v0.5.0 以下的预测实现**：会丢掉 P90 的顺序统计量修正（预测覆盖率从 80% 掉回 73%）。
   **不要回退到 v0.6.0 以下**：会丢掉实现前提核查（ADR-33），
   “某函数没处理 X”这类需求会重新变成盲猜。

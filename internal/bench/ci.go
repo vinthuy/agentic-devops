@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"agentdev/internal/delivery"
 	"agentdev/internal/workspace"
 )
 
@@ -169,16 +170,22 @@ func writeCIWorkflow(repoDir string, ci CIRemote) error {
 
 // pushBaseline 把当前 HEAD（fixture 基线）推到远端的新分支，返回该分支名。
 // 远端只接受“已存在的分支”，因此这里显式推一个新分支，不改动默认分支。
+//
+// 用强制推送让这一步幂等：`bench/<case>` 是**该用例独占的一次性 ref**，不会有
+// 别人往上面推。上一次运行若因网络中断没能清理，留在远端的同名分支会以
+// `! [rejected] ... (fetch first)` 挡住这一次——一个崩溃残留于是变成后续所有
+// 运行的拦路石，而这与产品行为毫无关系。实测中一次 6 用例的测量就是这样丢掉
+// 了一个样本。
 func pushBaseline(repoDir, id string, run int, ci CIRemote) (string, error) {
 	ci = ci.withDefaults()
 	branch := baseBranchFor(ci.BasePrefix, id, run)
-	if _, err := workspace.Git(repoDir, "branch", branch, "HEAD"); err != nil {
+	if _, err := workspace.Git(repoDir, "branch", "--force", branch, "HEAD"); err != nil {
 		return "", fmt.Errorf("创建基线分支失败: %w", err)
 	}
 	if _, err := workspace.Git(repoDir, "remote", "add", ci.RemoteName, ci.remoteURL()); err != nil {
 		return "", fmt.Errorf("配置远端失败: %w", err)
 	}
-	if _, err := workspace.Git(repoDir, "push", ci.RemoteName, branch); err != nil {
+	if err := delivery.PushRemoteForce(repoDir, ci.RemoteName, branch); err != nil {
 		return "", fmt.Errorf("推送基线分支失败: %w", err)
 	}
 	// 本地也要能按名字解析该分支，worktree 才能从它创建。

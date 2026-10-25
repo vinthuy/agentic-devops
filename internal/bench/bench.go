@@ -7,6 +7,7 @@ package bench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"agentdev/internal/backend"
 	"agentdev/internal/config"
 	"agentdev/internal/cost"
+	"agentdev/internal/delivery"
 	"agentdev/internal/llm"
 	"agentdev/internal/orchestrator"
 	"agentdev/internal/report"
@@ -262,6 +264,8 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 		if err != nil {
 			outcome.Err = "准备远端基线失败: " + err.Error()
 			outcome.Status = "ERROR"
+			// 远端不可达时任务根本没被创建，与产品能力无关。
+			outcome.Blocked = infraBlocked(err.Error())
 			return outcome
 		}
 		defaultBranch = base
@@ -365,15 +369,26 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 
 	if events, err := st.ListEvents(task.ID); err == nil {
 		outcome.Degradations = len(report.Degradations(events))
+		infraReason := ""
 		for _, e := range events {
 			if e.Type == "provider_quota" {
 				outcome.Blocked = true
+			}
+			if e.Type == "state_changed" && e.ToStatus == string(state.NeedsHuman) {
+				if r, _ := e.Payload["reason"].(string); infraBlocked(r) {
+					infraReason = r
+				}
 			}
 		}
 		if opts.CI != nil {
 			outcome.CIVerdict = ciVerdict(events)
 			// “首次即通过”要求真的跑过检查，且全程没有因为 CI 失败回过炉。
 			outcome.CIFirstPass = outcome.CIVerdict == "passed" && result.CIAttempts == 0
+		}
+		// 只有「一个 CI 结论都没拿到」才把网络故障算作阻断：已经跑出红/绿结论的
+		// 运行提供了真实信号，不能因为后续推送失败就整条剔除。
+		if infraReason != "" && outcome.CIVerdict == "" {
+			outcome.Blocked = true
 		}
 	}
 
@@ -572,6 +587,17 @@ func initRepo(dir string) error {
 	_, err := workspace.Git(dir, "-c", "user.name=bench", "-c", "user.email=bench@localhost",
 		"commit", "-m", "bench fixture baseline")
 	return err
+}
+
+// infraBlocked 判断一段失败文本是否只说明基础设施不可用（远端连不上、TLS 被重置）。
+//
+// 这类运行必须从成功率与人工介入率的分母里剔除：把它们算成失败，会让「今天
+// 网络不好」看起来像「一批需求做不出来」，而这两个数字的用途恰恰是衡量能力。
+func infraBlocked(text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	return delivery.IsTransientNetworkError(errors.New(text))
 }
 
 func orDash(s string) string {

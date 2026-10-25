@@ -1,0 +1,75 @@
+# CI 修复闭环的重复验证（G-09 / §22.6 的补充）。
+#
+# 目的不是扩大用例类型，而是回答一个具体问题：**闭环在重复运行时是否可靠**。
+# 此前该闭环只有一次真实证据（沙箱仓库 PR #1，$0.0267）。
+#
+# 每个用例都会：本地验证通过 → 推送 → CI 因 test_edges.py 失败 →
+# 日志回到编码器 → 修复 → 同一个 PR 更新 → CI 通过 → DONE。
+#
+# 用法：
+#   agentdev bench --manifest bench/ci_loop.yaml \
+#     --ci-repo vinthuy/agentdev-sandbox \
+#     --ci-workflow bench/ci_loop_workflow.yml --ci-cleanup=false
+#
+# 用例之间共用同一个 fixture：bench 会为每个用例单独复制并重新 git init，
+# 因此互不可见。
+cases:
+  - id: ci-loop-1
+    fixture: fixtures/ci-loop
+    requirement: "calc.py 里的 add(a, b) 返回了错误的结果（返回差而不是和）。请修正它，使两个数相加。"
+    verify:
+      test: "python -m unittest -q test_core.py"
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 2.0
+    expect_level: S
+
+  - id: ci-loop-2
+    fixture: fixtures/ci-loop
+    requirement: "calc.py 里的 add(a, b) 返回了错误的结果（返回差而不是和）。请修正它，使两个数相加。"
+    verify:
+      test: "python -m unittest -q test_core.py"
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 2.0
+    expect_level: S
+
+  - id: ci-loop-3
+    fixture: fixtures/ci-loop
+    requirement: "calc.py 里的 add(a, b) 返回了错误的结果（返回差而不是和）。请修正它，使两个数相加。"
+    verify:
+      test: "python -m unittest -q test_core.py"
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 2.0
+    expect_level: S
+
+  - id: ci-loop-4
+    fixture: fixtures/ci-loop
+    requirement: "calc.py 里的 add(a, b) 返回了错误的结果（返回差而不是和）。请修正它，使两个数相加。"
+    verify:
+      test: "python -m unittest -q test_core.py"
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 2.0
+    expect_level: S
+
+  - id: ci-loop-5
+    fixture: fixtures/ci-loop
+    requirement: "calc.py 里的 add(a, b) 返回了错误的结果（返回差而不是和）。请修正它，使两个数相加。"
+    verify:
+      test: "python -m unittest -q test_core.py"
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 2.0
+    expect_level: S
+
+  - id: ci-loop-6
+    fixture: fixtures/ci-loop
+    requirement: "calc.py 里的 add(a, b) 返回了错误的结果（返回差而不是和）。请修正它，使两个数相加。"
+    verify:
+      test: "python -m unittest -q test_core.py"
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 2.0
+    expect_level: S

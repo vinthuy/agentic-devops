@@ -761,6 +761,7 @@ func (o *Orchestrator) reviewStep(task store.Task, repo config.RepoConfig) (stor
 		Plan:        plan.PromptText(),
 		Diff:        diff,
 		Acceptance:  acceptanceSummary(o.store, task.ID),
+		CIFailure:   ciFailureEvidenceOf(o.store, task.ID),
 	})
 	if err == nil {
 		// 即便替换成自定义 Reviewer，也必须经过同一套程序侧校验；
@@ -817,6 +818,66 @@ func (o *Orchestrator) reviewStep(task store.Task, repo config.RepoConfig) (stor
 		"summary":  verdict.Summary,
 		"findings": reviewFindings(verdict),
 	}, map[string]any{"review_attempts": attempts})
+}
+
+// ciFailureEvidence 返回「当前这轮改动正在修的那次 CI 失败」。
+//
+// 只有当最后一次推送之后确实出现过 CI 失败时才返回内容：此时该失败仍是当前
+// diff 要解决的问题，审查者必须把它当作需求的客观延伸。否则审查者只看需求
+// 与 diff，会把「为满足失败检查而加的入参校验」判成超范围并要求回退，等于
+// 撤掉唯一能让 CI 变绿的改动。
+//
+// 一旦再次推送，判定就交给新的 CI 结果：旧失败的证据不再注入，避免用历史
+// 失败为当前改动背书。
+func ciFailureEvidence(events []store.Event) string {
+	lastPush := -1
+	for i, e := range events {
+		if e.Type == "state_changed" && e.ToStatus == string(state.Pushed) {
+			lastPush = i
+		}
+	}
+	var evidence string
+	for i := lastPush + 1; i < len(events); i++ {
+		e := events[i]
+		if e.Type != "fix_requested" {
+			continue
+		}
+		if src, _ := e.Payload["source"].(string); src != "ci" {
+			continue
+		}
+		if failure, _ := e.Payload["failure"].(string); failure != "" {
+			evidence = failure
+		}
+	}
+	return evidence
+}
+
+// noChangeReason 说明「为什么没有可提交的改动」。
+//
+// 挂在“有 CI 失败待修”的情况下，只说「没有可提交的改动」会让人以为编码器无所
+// 作为；真实情况通常是它判定「代码已正确、无需修改」，而那个判断可能是错的
+// （ADR-34 的日志截断就是这么暴露的）。把待修的 CI 失败写进原因，人工接手时
+// 才有一条可核对的线索。
+func noChangeReason(repo store.Repository, taskID string) string {
+	return noChangeReasonText(ciFailureEvidenceOf(repo, taskID))
+}
+
+// noChangeReasonText 是 noChangeReason 的纯函数部分，便于直接断言。
+func noChangeReasonText(ciFailure string) string {
+	if ciFailure != "" {
+		return "CI 仍为失败，但本轮没有产生可提交的改动：编码步骤判定现有代码无需修改。请核对上次 CI 失败是否真的已被满足"
+	}
+	return "没有可提交的改动"
+}
+
+// ciFailureEvidenceOf 读取事件后交给纯函数，缺失事件时按「无证据」处理：
+// 注入失败只会让审查少一条线索，不应让审查步骤整体失败。
+func ciFailureEvidenceOf(repo store.Repository, taskID string) string {
+	events, err := repo.ListEvents(taskID)
+	if err != nil {
+		return ""
+	}
+	return ciFailureEvidence(events)
 }
 
 // acceptanceSummary 把最近一次验收结果整理成审查者能直接引用的证据。
@@ -891,7 +952,7 @@ func (o *Orchestrator) deliverStep(task store.Task, repo config.RepoConfig) (sto
 			}
 		}
 		if sha == "" {
-			return o.move(task, state.NeedsHuman, map[string]any{"reason": "没有可提交的改动"}, nil)
+			return o.move(task, state.NeedsHuman, map[string]any{"reason": noChangeReason(o.store, task.ID)}, nil)
 		}
 	}
 	shaFields := map[string]any{"commit_sha": sha}
@@ -1064,14 +1125,11 @@ func (o *Orchestrator) ciStep(task store.Task, repo config.RepoConfig) (store.Ta
 					"summary": snap.Summary,
 				}, nil)
 			}
-			failure := "CI 失败：" + snap.Summary
-			if snap.Logs != "" {
-				failure += "\n\n" + snap.Logs
-			}
+			failure := ciFailureText(snap.Summary, snap.Logs)
 			if aerr := o.store.AppendEvent(task.ID, "fix_requested", map[string]any{
 				"attempt": attempts,
 				"source":  "ci",
-				"failure": truncateRunes(failure, 2000),
+				"failure": failure,
 			}); aerr != nil {
 				return task, aerr
 			}
@@ -1516,4 +1574,40 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
+}
+
+// ciFailureLimit 是交给编码步骤的 CI 失败文本上限。
+//
+// 取 4000 而不是 2000：GitHub Actions 的失败日志前面通常有上百行 workflow
+// 样板（步骤名、环境变量），上限过小会把断言挤出去。
+const ciFailureLimit = 4000
+
+// ciFailureText 组装回传给编码步骤的 CI 失败说明。
+//
+// 关键点：保留日志**尾部**。CI 日志开头几乎都是 workflow 样板（步骤名、
+// 环境变量），真正的断言与 traceback 在最后。按头部截断会把唯一有用的那段
+// 切掉，编码步骤就会得出「代码已正确、无需修改」的结论——实测中正是这样
+// 让任务转人工的。
+func ciFailureText(summary, logs string) string {
+	head := "CI 失败：" + truncateRunes(summary, 500)
+	if strings.TrimSpace(logs) == "" {
+		return head
+	}
+	budget := ciFailureLimit - len([]rune(head)) - 2 - len([]rune(tailMarker))
+	if budget < 200 {
+		budget = 200
+	}
+	return head + "\n\n" + tailRunes(logs, budget)
+}
+
+// tailMarker 标注被截断的位置，避免把半截日志当成全部证据。
+const tailMarker = "…（前部已截断）\n"
+
+// tailRunes 保留字符串尾部。
+func tailRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return tailMarker + string(r[len(r)-n:])
 }

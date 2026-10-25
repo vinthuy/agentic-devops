@@ -1,0 +1,58 @@
+# 由 agentdev bench --ci-workflow 使用：验证「红 CI → 自动修复」闭环。
+#
+# 本地验证只跑 test_core.py（见 ci_loop.yaml 的 verify），而 CI 额外写入
+# test_edges.py 并跑全量 discover。于是首次推送必然「本地通过、CI 失败」，
+# 失败原因只能从 CI 日志里读到：add 必须对 None / bool 抛 ValueError。
+#
+# 刻意在 workflow 里生成边界测试而不是放进 fixture：
+# 用例的基线分支里没有这个文件，Agent 无法通过改动它来让 CI 变绿
+# （workflow 在 checkout 之后覆盖写入）。
+name: ci
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 覆盖写入：即使分支里有人放了同名文件，也会被这里的版本替换。
+      - name: install CI-only edge checks
+        run: |
+          cat > test_edges.py <<'PY'
+          import unittest
+
+          from calc import add
+
+
+          class EdgeTests(unittest.TestCase):
+              """只在 CI 里跑的边界约束：本地验证刻意不包含本文件。"""
+
+              def test_none_is_rejected_with_value_error(self):
+                  with self.assertRaises(ValueError):
+                      add(None, 1)
+
+              def test_bool_is_rejected(self):
+                  # bool 是 int 的子类，容易被忽略；这里要求显式拒绝。
+                  with self.assertRaises(ValueError):
+                      add(True, 1)
+
+
+          if __name__ == "__main__":
+              unittest.main()
+          PY
+
+      - name: run tests
+        run: python -m unittest -q

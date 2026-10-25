@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"agentdev/internal/workspace"
 )
@@ -169,14 +170,99 @@ func EnsurePushable(req PushRequest) error {
 }
 
 // Push 校验并推送分支，同时建立追踪关系。
+//
+// 传输层抖动（TLS 握手被重置、连接被中断、DNS 暂时失败）重试几次通常就好了；
+// 直接判死会把一次网络抖动变成人工工单。认证/权限类错误不在重试范围：重复
+// 尝试只会把凭据问题拖成"卡住"，必须原样暴露。
 func Push(req PushRequest) error {
 	if err := EnsurePushable(req); err != nil {
 		return err
 	}
-	if _, err := workspace.Git(req.Worktree, "push", "--set-upstream", req.Remote, req.Branch); err != nil {
+	if err := pushWithRetry(req.Worktree, "--set-upstream", req.Remote, req.Branch); err != nil {
 		return fmt.Errorf("推送分支失败: %w", err)
 	}
 	return nil
+}
+
+// PushRemoteForce 推送一个分支但不建立追踪关系，并强制覆盖远端同名分支。
+//
+// 只用于**独占的一次性 ref**（如基准用例的基线分支）：那里不存在“别人推了什么”
+// 的问题，而崩溃残留必须以覆盖而不是拒绝的方式自愈。复用与 Push 相同的重试策略。
+func PushRemoteForce(worktree, remote, branch string) error {
+	if err := pushWithRetry(worktree, "--force", remote, branch); err != nil {
+		return fmt.Errorf("推送分支失败: %w", err)
+	}
+	return nil
+}
+
+// pushWithRetry 对传输层抖动重试；认证、权限、分支保护等错误立即返回。
+func pushWithRetry(worktree string, args ...string) error {
+	var err error
+	for attempt := 1; attempt <= pushAttempts; attempt++ {
+		if _, err = workspace.Git(worktree, append([]string{"push"}, args...)...); err == nil {
+			return nil
+		}
+		if !IsTransientNetworkError(err) || attempt == pushAttempts {
+			break
+		}
+		time.Sleep(pushBackoff * time.Duration(attempt))
+	}
+	return err
+}
+
+const (
+	pushAttempts = 3
+	pushBackoff  = 2 * time.Second
+)
+
+// permanentGitErrors 是即使重试也不会变好的错误。命中它们时不做重试。
+var permanentGitErrors = []string{
+	"Authentication failed",
+	"Permission denied",
+	"returned error: 40",
+	"returned error: 403",
+	"not found",
+	"Repository not found",
+	"protected branch",
+	"non-fast-forward",
+}
+
+// transientGitErrors 是传输层抖动的典型特征。
+var transientGitErrors = []string{
+	"unable to access",
+	"schannel",
+	"SSL",
+	"TLS",
+	"Connection reset",
+	"Connection timed out",
+	"timed out",
+	"Could not resolve host",
+	"remote end hung up",
+	"early EOF",
+	"RPC failed",
+	"HTTP 5",
+}
+
+// IsTransientNetworkError 判断一次 git 失败是否值得重试。
+//
+// 排除项优先：认证失败、分支保护、目标不存在等情况重试无意义，而且会把
+// 真实的配置问题掩盖成"偶发网络问题"。
+func IsTransientNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, p := range permanentGitErrors {
+		if strings.Contains(msg, p) {
+			return false
+		}
+	}
+	for _, t := range transientGitErrors {
+		if strings.Contains(msg, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // PRRequest 描述一次 PR 创建请求。
