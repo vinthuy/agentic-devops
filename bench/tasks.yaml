@@ -5,6 +5,10 @@
 #   agentdev bench --manifest bench/tasks.yaml --backend anthropic --only py-email-plus
 #   agentdev bench --manifest bench/tasks.yaml --backend anthropic --json
 #
+# 末尾三例（*M 后缀）是 M 级用例，需求措辞会命中 triage 的高风险信号（令牌/鉴权/依赖版本）。
+# 它们必须配 --auto-approve 才有结果，否则会停在 AWAITING_APPROVAL 被判失败：
+#   agentdev bench --manifest bench/tasks.yaml --auto-approve --only py-token-expiry
+#
 # 每个用例都会把 fixture 复制到临时目录并重新 git init，因此用例之间互不影响。
 # 需求文本会经过真实分级，ExpectLevel 用于同时检验分级是否落在 S。
 cases:
@@ -261,3 +265,42 @@ cases:
       - "*.test.js"
     budget_usd: 1.0
     expect_level: S
+
+  - id: py-dependency-version
+    fixture: fixtures/py-dependency-version
+    requirement: >-
+      修复 deps.py 中的依赖版本约束判断：依赖清单里常见 "v1.2.3" 这种带前缀的
+      版本号，目前会让 parse_version 抛 ValueError，导致整个依赖校验失败。
+      期望带 "v" 前缀与不带前缀等价。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: M
+
+  - id: py-token-expiry
+    fixture: fixtures/py-token-expiry
+    requirement: >-
+      修复 tokens.py 中的访问令牌过期判断：令牌在恰好达到 ttl 秒时仍被判定为
+      有效，等于多放行一个请求窗口；ttl 为 0 的令牌也应立即过期。
+      期望 ttl 到点即视为过期。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: M
+
+  - id: go-auth-header
+    fixture: fixtures/go-auth-header
+    requirement: >-
+      修复 auth.go 中的 ParseBearer：鉴权头里的 scheme 按 RFC 7235 大小写不敏感，
+      目前只接受 "Bearer " 这一种写法；令牌两侧的空白也没有去掉，只发空格的
+      头会被当成有效令牌。请勿修改测试。
+    verify:
+      test: go test ./...
+    verify_config_files:
+      - "*_test.go"
+    budget_usd: 1.0
+    expect_level: M

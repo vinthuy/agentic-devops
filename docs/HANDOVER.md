@@ -1,4 +1,4 @@
-# 交接说明（v0.8.0）
+# 交接说明（v0.9.0）
 
 本文件记录当前版本**已验证**与**未验证**的边界，避免把单元测试通过当成线上可用。
 设计依据见 `docs/PRD.md`、`docs/SDD.md`；验收矩阵在 SDD §21。
@@ -29,9 +29,9 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 | 项目 | 证据 |
 |---|---|
 | 构建与静态检查 | `gofmt -l .` 无输出；`go build ./...`、`go vet ./...` 通过 |
-| 测试 | 278 个顶层测试函数（含子测试共 312 条 PASS），19 个含测试的包全部 `ok`（共 21 个包，另 2 个无测试文件） |
+| 测试 | 280 个顶层测试函数（含子测试共 314 条 PASS），19 个含测试的包全部 `ok`（共 21 个包，另 2 个无测试文件） |
 | 真实模型端到端 | DeepSeek 完成 邮箱/slug/CSV/字典 等任务，Reviewer 返回 approve |
-| 基准集 | 20 个 S 级用例（Python 10 / Go 7 / JS 3），修复前均确认失败；重复采样 38/40 = 95%，平均 $0.0105/次；ADR-31 回归轮 20/20 = 100%（$0.0095/次）；ADR-33 回归轮 20/20 = 100%（$0.0095/次，SDD §22.3） |
+| 基准集 | 23 个用例（S 级 20：Python 10 / Go 7 / JS 3；M 级 3）：修复前均确认失败。S 级重复采样 38/40 = 95%，平均 $0.0105/次；ADR-31 回归轮 20/20、ADR-33 回归轮 20/20（均 $0.0095/次，SDD §22.3）。M 级 3/3 通过（合成审批，$0.0080～$0.0205，SDD §22.7） |
 | 崩溃恢复 | 真实子进程在模型调用中途被 kill，重启后完成且只产生 1 个提交 |
 | 策略 | 路径穿越、符号链接逃逸、敏感路径、危险命令、`-exec` 类追加参数均被拒绝 |
 | 成本 | 逐次模型调用记账、80% 预警、100% 熔断；缺单价显式告警 |
@@ -68,7 +68,21 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 
 ## 5. 版本基线
 
-- 代码版本：`v0.8.0`（`internal/cli.Version`）
+- 代码版本：`v0.9.0`（`internal/cli.Version`）
+- `v0.9.0` 相对 `v0.8.0` 的实质变化：
+  - **基准集补上 M 级**（§22.7，ADR-37）：20 个 S 级用例连续两轮 100%，基准已饱和，
+    只能防灾难性回归、不能防质量退化；而 M 级一直被结构性排除——bench 只调用一次
+    `RunTask`，任务停在 `AWAITING_APPROVAL` 就记为失败，于是所有用例措辞都写得很「安全」。
+  - 新增 `bench --auto-approve`：M 级任务用**合成审批**越过审批门继续执行。
+    结果里强制带 `synthetic_approval`，表格显示为 `PASS*`——把「绕开了门」说成
+    「通过了门」正是 ADR-22/ADR-36 反复要避免的失真。
+  - 新增 3 个 M 级用例（`py-dependency-version`、`py-token-expiry`、`go-auth-header`），
+    清单从 20 增到 23；`TestCommittedManifestIsValid` 现在要求至少 3 个 M 级用例，
+    防止基准悄悄退回全 S。
+  - 实测：3/3 通过，$0.0080～$0.0205，36～61 秒，均为 0 次修复、0 次审查打回。
+    人工核对确认是真修（`>`→`>=`、剥离 `v` 前缀、`EqualFold`+`TrimSpace`），
+    测试文件与 fixture 逐字节一致。
+  - **注意**：M 级的「M」来自需求措辞而非真实风险；审批门本身没有被验证。
 - `v0.8.0` 相对 `v0.7.0` 的实质变化：
   - **红 CI 闭环从 N=1 扩到 6 次重复运行**（§23.9，新增 `bench/ci_loop.yaml` 与
     `bench/ci_loop_workflow.yml`）。扩样把通过率从 2/6 拉到 **6/6**，代价是暴露两个
@@ -109,7 +123,9 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
   `ci/github-workflow.yml.template` 保留作为分发模板，内容与启用后的文件一致。
 - 推送 `.github/workflows/*` 需要 `gh` 令牌具备 `workflow` scope：
   `gh auth refresh -h github.com -s workflow`。
-- 回退方式：`git checkout v0.8.0`。
+- 回退方式：`git checkout v0.9.0`。
+  **不要回退到 v0.8.0 以下**：会丢掉 M 级用例与 `--auto-approve`，基准重新退回全 S
+  饱和状态（连续两轮 100%，测不出质量退化）。
   **不要回退到 v0.7.0 以下**：会丢掉 CI 失败日志的尾部保留与审查上下文注入（ADR-34），
   红 CI 闭环会从 6/6 掉回 2/6——失败的形态是「编码步骤说无需修改」或「Reviewer 要求
   回退 CI 要求的改动」，两者都不会报错，只会悄悄转人工。

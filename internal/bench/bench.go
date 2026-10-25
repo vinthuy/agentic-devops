@@ -78,8 +78,13 @@ type Outcome struct {
 	PRURL string `json:"pr_url,omitempty"`
 	// Blocked 表示运行被基础设施问题阻断（如模型余额不足），
 	// 与产品能力无关，不应计入成功率分母。
-	Blocked bool   `json:"blocked,omitempty"`
-	Err     string `json:"error,omitempty"`
+	Blocked bool `json:"blocked,omitempty"`
+	// SyntheticApproval 表示本次运行用**合成审批**越过了 M 级审批门。
+	//
+	// 它必须在报告里可见：否则「M 级用例通过」会被读成「审批门验证通过」，
+	// 而实际上门被基准自己绕开了。
+	SyntheticApproval bool   `json:"synthetic_approval,omitempty"`
+	Err               string `json:"error,omitempty"`
 }
 
 // Summary 是基准集的聚合指标。启用 --repeat 时，每个用例会贡献多次 trial，
@@ -133,6 +138,13 @@ type Options struct {
 	// CI 非 nil 时，每个用例都会推送到真实远端并开启 delivery + ci_watch，
 	// 用真实 CI 的结果统计首次通过率。为 nil 时完全离线（旧行为）。
 	CI *CIRemote
+	// AutoApprove 允许 M 级用例在基准中用**合成审批**继续执行。
+	//
+	// 没有它，任何踩中 M 级规则的需求都会停在 AWAITING_APPROVAL 并被判失败——
+	// 这不是产品缺陷，而是「等人审批」在无人值守场景下的必然结果。但合成审批
+	// 让 M 级的审批门形同虚设，所以 Outcome 里必须记录它真的发生过，
+	// 否则读报告的人会以为这道门被验证过了。
+	AutoApprove bool
 	// Log 接收逐用例进度输出，可为 nil。
 	Log io.Writer
 }
@@ -349,6 +361,19 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 	orch := orchestrator.New(st, cfg, be, orchOpts...)
 
 	result, runErr := orch.RunTask(task.ID)
+	// M 级任务在编码前停下来等人审批；基准无人值守，只能合成一次审批继续。
+	//
+	// 只合成一次：若审批后再次停下，说明有别的东西在反复触发，那正是需要被
+	// 看见的异常，不该用循环把它掩过去。
+	if opts.AutoApprove && runErr == nil && result.Status == state.AwaitingApproval {
+		if _, terr := st.Transition(task.ID, result.Version, state.Coding,
+			map[string]any{"approved_by": "bench:auto", "synthetic": true}, nil); terr != nil {
+			runErr = fmt.Errorf("合成审批失败: %w", terr)
+		} else {
+			outcome.SyntheticApproval = true
+			result, runErr = orch.RunTask(task.ID)
+		}
+	}
 	headBranch = result.Branch
 	outcome.DurationS = time.Since(started).Seconds()
 	if runErr != nil {

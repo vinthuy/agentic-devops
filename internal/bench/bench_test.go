@@ -230,6 +230,15 @@ func TestCommittedManifestIsValid(t *testing.T) {
 			t.Errorf("%s: fixture 不存在: %v", c.ID, err)
 		}
 	}
+	// 全是 S 级的基准会饱和在 100%，再也测不出质量退化。至少保留若干 M 级用例，
+	// 让「审批门之后还能不能跑完」这条路径一直有样本。
+	levels := map[string]int{}
+	for _, c := range manifest.Cases {
+		levels[c.ExpectLevel]++
+	}
+	if levels["M"] < 3 {
+		t.Errorf("基准集应至少含 3 个 M 级用例（当前 S=%d M=%d L=%d）", levels["S"], levels["M"], levels["L"])
+	}
 }
 
 func TestLoadRejectsInvalidManifests(t *testing.T) {
@@ -248,5 +257,76 @@ func TestLoadRejectsInvalidManifests(t *testing.T) {
 		if _, err := Load(path); err == nil {
 			t.Errorf("应拒绝非法清单:\n%s", content)
 		}
+	}
+}
+
+// M 级用例的需求措辞会命中 triage 的高风险信号，流水线在编码前停下来等人审批。
+// 无人值守的基准里这是死路：不加 --auto-approve 时它会以 AWAITING_APPROVAL 收场，
+// 而不是被误判成「产品做不出来」。
+func TestMLevelCaseParksWithoutAutoApprove(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir)
+	manifest := Manifest{Cases: []Case{{
+		ID:          "m-park",
+		Fixture:     "fixture",
+		Requirement: "调整鉴权头解析，并更新访问令牌的过期判断",
+		Verify:      map[string]string{"check": "go run check.go"},
+		ExpectLevel: "M",
+		BudgetUSD:   1,
+	}}}
+
+	_, outcomes, err := RunManifest(context.Background(), dir, manifest, Options{
+		WorkDir:    t.TempDir(),
+		BackendFor: fakeWriting("hello\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := outcomes[0]
+	if o.Status != "AWAITING_APPROVAL" {
+		t.Fatalf("M 级应停在 AWAITING_APPROVAL，实际 %s", o.Status)
+	}
+	if o.Passed {
+		t.Error("停在审批门的运行不应算通过")
+	}
+	if o.SyntheticApproval {
+		t.Error("未开启 AutoApprove 时不应记录合成审批")
+	}
+}
+
+// 开启 AutoApprove 后，M 级用例用合成审批继续跑完，且必须在结果里留痕：
+// 否则「M 级通过」会被读成「审批门验证通过」，而门其实是被基准绕开的。
+func TestMLevelCaseCompletesWithSyntheticApproval(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir)
+	manifest := Manifest{Cases: []Case{{
+		ID:          "m-pass",
+		Fixture:     "fixture",
+		Requirement: "调整鉴权头解析，并更新访问令牌的过期判断",
+		Verify:      map[string]string{"check": "go run check.go"},
+		ExpectLevel: "M",
+		BudgetUSD:   1,
+	}}}
+
+	summary, outcomes, err := RunManifest(context.Background(), dir, manifest, Options{
+		WorkDir:     t.TempDir(),
+		AutoApprove: true,
+		BackendFor:  fakeWriting("hello\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := outcomes[0]
+	if o.Status != "DONE" || !o.Passed {
+		t.Fatalf("合成审批后应完成，实际 %s（%s）", o.Status, o.Err)
+	}
+	if o.Level != "M" || !o.LevelMatched {
+		t.Errorf("分级应为 M 且匹配预期: %+v", o)
+	}
+	if !o.SyntheticApproval {
+		t.Error("必须记录合成审批，否则报告会高估审批门的覆盖")
+	}
+	if summary.Passed != 1 {
+		t.Errorf("汇总应计为通过: %+v", summary)
 	}
 }

@@ -35,7 +35,7 @@ import (
 	"agentdev/internal/workspace"
 )
 
-const Version = "0.8.0"
+const Version = "0.9.0"
 
 const (
 	ExitOK    = 0
@@ -636,6 +636,17 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// countSyntheticApprovals 数出用合成审批越过 M 级审批门的运行次数。
+func countSyntheticApprovals(outcomes []bench.Outcome) int {
+	n := 0
+	for _, o := range outcomes {
+		if o.SyntheticApproval {
+			n++
+		}
+	}
+	return n
 }
 
 // loadTask 打开存储并读取任务，统一处理“不存在”的错误码。
@@ -1516,6 +1527,7 @@ func benchCmd(opts *options) *cobra.Command {
 		ciTimeout    int
 		ciWorkflow   string
 		sharedHome   string
+		autoApprove  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "bench",
@@ -1547,10 +1559,11 @@ func benchCmd(opts *options) *cobra.Command {
 			}
 
 			benchOpts := bench.Options{
-				WorkDir:    workDir,
-				Keep:       keep,
-				Repeat:     repeat,
-				SharedHome: sharedHome,
+				WorkDir:     workDir,
+				Keep:        keep,
+				Repeat:      repeat,
+				SharedHome:  sharedHome,
+				AutoApprove: autoApprove,
 				// 进度写 stderr，stdout 留给表格或 --json，避免机器可读输出被污染。
 				Log: cmd.ErrOrStderr(),
 				BackendFor: func(bench.Case) (backend.ExecutionBackend, error) {
@@ -1622,6 +1635,10 @@ func benchCmd(opts *options) *cobra.Command {
 				case o.Passed:
 					mark = "PASS"
 				}
+				if o.SyntheticApproval {
+					// 星号不是装饰：它说明这次运行绕过了 M 级审批门。
+					mark += "*"
+				}
 				if benchOpts.CI != nil {
 					first := "否"
 					switch {
@@ -1643,6 +1660,10 @@ func benchCmd(opts *options) *cobra.Command {
 			}
 			if err := w.Flush(); err != nil {
 				return err
+			}
+			if synthetic := countSyntheticApprovals(outcomes); synthetic > 0 {
+				fmt.Fprintf(out, "\n* %d 次运行用**合成审批**越过了 M 级审批门："+
+					"这些结果说明 M 级任务能跑完，但**不**说明审批门被验证过。\n", synthetic)
 			}
 			if stats := bench.ByCase(outcomes); len(stats) > 0 && repeat > 1 {
 				fmt.Fprintln(out, "\n按用例统计：")
@@ -1698,6 +1719,9 @@ func benchCmd(opts *options) *cobra.Command {
 	f.IntVar(&ciTimeout, "ci-timeout", 10, "单个用例等待 CI 的上限（分钟）")
 	f.StringVar(&ciWorkflow, "ci-workflow", "", "写入基线分支的 CI 定义文件（默认内置通用模板）")
 	f.StringVar(&sharedHome, "shared-home", "", "所有用例共用一个数据目录，使花费样本跨用例累积（用于校准 cost forecast）")
+	f.BoolVar(&autoApprove, "auto-approve", false,
+		"用合成审批越过 M 级审批门（否则 M 级用例会停在 AWAITING_APPROVAL 被判失败）；"+
+			"报告会标注 synthetic_approval，勿把它读成「审批门已验证」")
 	return cmd
 }
 
