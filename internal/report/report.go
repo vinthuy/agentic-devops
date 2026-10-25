@@ -54,7 +54,9 @@ func WriteRunArtifacts(repo store.Repository, cfg *config.App, taskID string) (s
 	}
 
 	reportPath := filepath.Join(dir, "report.md")
-	content := render(task, events, violations, verifications, costs, time.Now().UTC().Format(time.RFC3339))
+	content := render(task, events, violations, verifications, costs,
+		ReviewPlan(task.PlanJSON, cfg.Repos[task.Repo], cfg.Policy),
+		time.Now().UTC().Format(time.RFC3339))
 	if err := os.WriteFile(reportPath, []byte(content), 0o644); err != nil {
 		return "", err
 	}
@@ -63,7 +65,8 @@ func WriteRunArtifacts(repo store.Repository, cfg *config.App, taskID string) (s
 
 func render(
 	task store.Task, events []store.Event, violations []store.Violation,
-	verifications []store.Verification, costs []store.CostEntry, generatedAt string,
+	verifications []store.Verification, costs []store.CostEntry,
+	review PlanReview, generatedAt string,
 ) string {
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
@@ -171,6 +174,16 @@ func render(
 	line("")
 	line("> %s", strings.ReplaceAll(task.Requirement, "\n", "\n> "))
 	line("")
+
+	// 计划必须能在报告里复盘：审批时看到的是计划，事后要能核对「批准的到底是什么」。
+	if !review.Empty {
+		line("## 计划")
+		line("")
+		for _, l := range review.Lines() {
+			line("%s", l)
+		}
+		line("")
+	}
 	line("## 验证记录")
 	line("")
 	if len(verifications) == 0 {

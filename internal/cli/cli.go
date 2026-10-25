@@ -35,7 +35,7 @@ import (
 	"agentdev/internal/workspace"
 )
 
-const Version = "0.12.0"
+const Version = "0.13.0"
 
 const (
 	ExitOK    = 0
@@ -583,6 +583,20 @@ func taskStatusCmd(opts *options) *cobra.Command {
 			}
 			fmt.Fprintf(out, "修复次数: %d   审查次数: %d   CI 修复次数: %d   花费: $%.4f / 预算 $%.2f\n",
 				task.FixAttempts, task.ReviewAttempts, task.CIAttempts, task.SpentUSD, task.BudgetUSD)
+
+			// 计划必须在审批门可见：能拒能放，但看不到在批什么，等于没法判断。
+			// 已有计划时一律展示（不限状态），事后复盘也用它。
+			review := report.ReviewPlan(task.PlanJSON, cfg.Repos[task.Repo], cfg.Policy)
+			if lines := review.Lines(); len(lines) > 0 {
+				fmt.Fprintln(out, "\n计划:")
+				for _, l := range lines {
+					fmt.Fprintln(out, "  "+l)
+				}
+			}
+			if task.Status == state.AwaitingApproval {
+				fmt.Fprintln(out, "\n等待审批。批准: agentdev task approve "+task.ID+
+					"    驳回: agentdev task reject "+task.ID+" --reason \"...\"")
+			}
 			if len(events) > 15 {
 				events = events[len(events)-15:]
 			}

@@ -37,7 +37,7 @@ func TestReportRendersSourceAndDegradationProminently(t *testing.T) {
 		{Type: "plan_failed", Payload: map[string]any{"error": "tool choice rejected"}},
 		{Type: "plan_ready", Payload: map[string]any{"source": "static_fallback"}},
 	}
-	content := render(task, events, nil, nil, nil, "now")
+	content := render(task, events, nil, nil, nil, PlanReview{}, "now")
 	for _, expected := range []string{
 		"分级来源: 规则",
 		"计划来源: 静态降级",
@@ -63,7 +63,7 @@ func TestReportShowsArtifactAuditAndReviewerDecision(t *testing.T) {
 		}},
 		{Type: "state_changed", Payload: map[string]any{"ci": "none", "summary": "无检查"}},
 	}
-	content := render(task, events, nil, nil, nil, "now")
+	content := render(task, events, nil, nil, nil, PlanReview{}, "now")
 	for _, expected := range []string{
 		"来源: GitHub Issue https://github.com/acme/app/issues/8",
 		"## 提交审计", "__pycache__/x.pyc",

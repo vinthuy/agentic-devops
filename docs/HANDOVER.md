@@ -1,4 +1,4 @@
-# 交接说明（v0.12.0）
+# 交接说明（v0.13.0）
 
 本文件记录当前版本**已验证**与**未验证**的边界，避免把单元测试通过当成线上可用。
 设计依据见 `docs/PRD.md`、`docs/SDD.md`；验收矩阵在 SDD §21。
@@ -33,6 +33,7 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 | 真实模型端到端 | DeepSeek 完成 邮箱/slug/CSV/字典 等任务，Reviewer 返回 approve |
 | 基准集 | 24 个用例（S 级 20：Python 10 / Go 7 / JS 3；M 级 4）：修复前均确认失败。S 级重复采样 38/40 = 95%，平均 $0.0105/次；ADR-31 回归轮 20/20、ADR-33 回归轮 20/20（均 $0.0095/次，SDD §22.3）。M 级 4/4 通过（合成审批，$0.0080～$0.0205，SDD §22.7），其中 `py-session-refresh` 是唯一**跨两文件**改动，真实模型同时改对 `clock.py` 与 `session.py` |
 | **审批门（放行 / 驳回 / 回退）** | 真实 DeepSeek 端到端（SDD §22.8，ADR-39）：M 级任务停在 `AWAITING_APPROVAL` 且后端未被调用；`task reject --reason`（含 `--by`）→ `REJECTED`，工作区一个字节未改、任务不再被取走；`task reject --replan` → 回 `PLANNING`，重新规划后**再次**停在审批门；`task approve` → `DONE`，提交 `bd7f6d4` 真把 `a - b` 改成 `a + b`，`main` 未动。驳回理由确实进了规划器（新计划摘要吸收了「确认 test_core.py 的期望」） |
+| **审批者能看到计划** | ADR-41：`task status` 与 `report.md` 渲染摘要/步骤（含文件）/`allowed_paths`/验收标准/风险/预估花费。真实输出纠正了一个误报——`step2「运行 python -m unittest test_core.py」` 把测试文件列进 `files`，第一版据此报「计划要改测试」，而该文件不在 `allowed_paths` 内、写它会被策略拦下。改为按 `allowed_paths` 划界，只报「策略拦不住、只有人能拦」的情形；`estimated_cost_usd`（模型自估，实测把预算 $1.00 当预估，真实 $0.0045）改为标注来源 |
 | **审批超时** | ADR-40：超时升级到 `NEEDS_HUMAN`（不自动放行/驳回），`resume` 可送回审批门并重新计时；7 个确定性测试覆盖（`TestRunEscalatesStaleApproval` 等），时钟通过回拨 `updated_at` 模拟，不 sleep |
 | 崩溃恢复 | 真实子进程在模型调用中途被 kill，重启后完成且只产生 1 个提交 |
 | 策略 | 路径穿越、符号链接逃逸、敏感路径、危险命令、`-exec` 类追加参数均被拒绝 |
@@ -74,7 +75,16 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 
 ## 5. 版本基线
 
-- 代码版本：`v0.12.0`（`internal/cli.Version`）
+- 代码版本：`v0.13.0`（`internal/cli.Version`）
+- `v0.13.0` 相对 `v0.12.0` 的实质变化：
+  - **审批者终于看得到计划**（§22.8，ADR-41）：`plan_json` 此前是只写不读的数据，
+    `task status` 只有需求一句话。现在渲染摘要/步骤/涉及文件/`allowed_paths`/
+    验收标准/风险标记/预估花费，`report.md` 也新增「计划」章节可复盘。
+  - **风险提示以 `allowed_paths` 划界**：只有落在可写范围内的验证配置文件/敏感路径
+    才报警——那是策略拦不住、只有人能拦的部分。第一版按 `steps[].files` 一律报，
+    被真实输出证伪（「运行 test_core.py」被误报成「要改测试」）。
+  - 模型自估的 `estimated_cost_usd` 标注为「未经校准」：实测出现过填预算 $1.00
+    而真实花费 $0.0045 的情况。
 - `v0.12.0` 相对 `v0.11.0` 的实质变化：
   - **审批超时升级**（§22.8，ADR-40）：`policy.yaml` 新增 `approval_timeout_minutes`
     （默认 0 = 不超时）。超过阈值升级到 `NEEDS_HUMAN` 并记录 `approval_timeout` 事件，
