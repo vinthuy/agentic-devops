@@ -112,6 +112,57 @@ func TestRunAllEvaluatesFileAndGrepChecks(t *testing.T) {
 	}
 }
 
+// 基准实测：规划器写了跨行 grep，实现和单测都正确，却因按行匹配永远失败，
+// 烧完修复次数后转人工。模式来自 py-dependency-version 第 2 次运行。
+func TestGrepMatchesPatternThatSpansLines(t *testing.T) {
+	v, dir := newVerifier(t)
+	body := "def parse_version(version):\n    if version.startswith(\"v\") or version.startswith(\"V\"):\n        version = version[1:]\n"
+	must(t, os.WriteFile(filepath.Join(dir, "deps.py"), []byte(body), 0o644))
+
+	acceptance := []planning.Acceptance{{
+		ID:          "ac-parse-v",
+		Description: "parse_version 包含前导 v 处理",
+		Check: planning.Check{
+			Type:    planning.CheckGrep,
+			Path:    "deps.py",
+			Pattern: `def parse_version[\s\S]{0,200}?['"]v['"]`,
+			Expect:  "present",
+		},
+	}}
+	rep, err := v.RunAll(dir, nil, acceptance, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Passed {
+		t.Fatalf("跨行模式应命中下一行的字面量: %+v", rep.Acceptance)
+	}
+	if !strings.Contains(rep.Acceptance[0].Evidence, "deps.py:1:") {
+		t.Errorf("证据应指向匹配开始的那一行: %s", rep.Acceptance[0].Evidence)
+	}
+}
+
+// ^ 和 $ 必须仍表示行首行尾。整文件匹配时若丢掉多行模式，^ 只会命中文件开头。
+func TestGrepAnchorsRemainPerLine(t *testing.T) {
+	v, dir := newVerifier(t)
+	must(t, os.WriteFile(filepath.Join(dir, "src.py"), []byte("header\ntarget\n"), 0o644))
+
+	acceptance := []planning.Acceptance{
+		{ID: "line-start", Description: "第二行行首", Check: planning.Check{
+			Type: planning.CheckGrep, Path: "src.py", Pattern: "^target$", Expect: "present",
+		}},
+		{ID: "not-file-start", Description: "不是文件开头", Check: planning.Check{
+			Type: planning.CheckGrep, Path: "src.py", Pattern: "^header$", Expect: "present",
+		}},
+	}
+	rep, err := v.RunAll(dir, nil, acceptance, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Passed {
+		t.Fatalf("行锚点应仍然有效: %+v", rep.Acceptance)
+	}
+}
+
 func TestRunAllFailsWhenAcceptanceUnmet(t *testing.T) {
 	v, dir := newVerifier(t)
 	acceptance := []planning.Acceptance{

@@ -321,7 +321,10 @@ func (v Verifier) runAcceptance(cwd, name, command string, attempt int) (accepta
 }
 
 func grepFile(path, pattern string) (bool, string, error) {
-	re, err := regexp.Compile(pattern)
+	// (?m) 让 ^ 和 $ 仍表示行首行尾。匹配范围是整份文件：按行匹配时，
+	// `def parse_version[\s\S]{0,200}?['"]v['"]` 这种跨行模式永远失败，
+	// 即使下一行已经写了 startswith("v")，验收也会把正确实现打回去。
+	re, err := regexp.Compile("(?m)" + pattern)
 	if err != nil {
 		return false, "正则无效: " + err.Error(), err
 	}
@@ -329,12 +332,17 @@ func grepFile(path, pattern string) (bool, string, error) {
 	if err != nil {
 		return false, "无法读取 " + path + ": " + err.Error(), nil
 	}
-	for i, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-		if re.MatchString(line) {
-			return true, fmt.Sprintf("%s:%d: %s", path, i+1, strings.TrimSpace(line)), nil
-		}
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	loc := re.FindStringIndex(text)
+	if loc == nil {
+		return false, "未匹配到 " + pattern, nil
 	}
-	return false, "未匹配到 " + pattern, nil
+	line := 1 + strings.Count(text[:loc[0]], "\n")
+	lineText := text[loc[0]:]
+	if nl := strings.IndexByte(lineText, '\n'); nl >= 0 {
+		lineText = lineText[:nl]
+	}
+	return true, fmt.Sprintf("%s:%d: %s", path, line, strings.TrimSpace(lineText)), nil
 }
 
 func lastRunes(s string, n int) string {
