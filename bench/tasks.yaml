@@ -304,3 +304,19 @@ cases:
       - "*_test.go"
     budget_usd: 1.0
     expect_level: M
+
+  # 唯一需要**跨文件**改动的 M 级用例：过期判定在 clock.py，使用方在 session.py，
+  # 修好其中一处会让另一处的缺陷以新的失败形式暴露出来。
+  - id: py-session-refresh
+    fixture: fixtures/py-session-refresh
+    requirement: >-
+      修复会话鉴权模块的过期语义：会话在满 ttl 的时刻起就不应再被读取，
+      目前恰好到点仍被当作有效；refresh 也没有真正延长会话，刷新后仍然按
+      最初签发时间过期；对已过期的会话发起 refresh 应当失败而不是续期。
+      过期判定在 clock.py，使用方在 session.py。请勿修改测试。
+    verify:
+      test: python -m unittest -q
+    verify_config_files:
+      - "test_*.py"
+    budget_usd: 1.0
+    expect_level: M

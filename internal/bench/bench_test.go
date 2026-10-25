@@ -236,8 +236,19 @@ func TestCommittedManifestIsValid(t *testing.T) {
 	for _, c := range manifest.Cases {
 		levels[c.ExpectLevel]++
 	}
-	if levels["M"] < 3 {
-		t.Errorf("基准集应至少含 3 个 M 级用例（当前 S=%d M=%d L=%d）", levels["S"], levels["M"], levels["L"])
+	if levels["M"] < 4 {
+		t.Errorf("基准集应至少含 4 个 M 级用例（当前 S=%d M=%d L=%d）", levels["S"], levels["M"], levels["L"])
+	}
+	// 单函数改动的 M 用例只检验「审批门之后流水线能不能跑完」。至少要有 1 个
+	// 跨文件的用例，否则规划质量（能否同时改对多处）始终没有样本。
+	multiFile := false
+	for _, c := range manifest.Cases {
+		if c.ID == "py-session-refresh" {
+			multiFile = true
+		}
+	}
+	if !multiFile {
+		t.Error("基准集缺少跨文件 M 级用例 py-session-refresh：单文件改动测不出规划质量")
 	}
 }
 
