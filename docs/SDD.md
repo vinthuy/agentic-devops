@@ -108,7 +108,7 @@
 |---|---|---|
 | `QUEUED` | 已创建，等待调度 | 否 |
 | `TRIAGING` | 分级中 | 否 |
-| `REJECTED` | L 级任务，拒绝执行 | 是 |
+| `REJECTED` | 人工否决（L 级不执行，或 M 级审批被驳回） | 是 |
 | `PLANNING` | Planner 生成计划中 | 否 |
 | `NEEDS_INFO` | 等待用户回答澄清问题 | 否（挂起） |
 | `AWAITING_APPROVAL` | 等待用户审批（M 级） | 否（挂起） |
@@ -137,6 +137,8 @@
 | PLANNING | 模型规划失败，静态计划有效 | 按需求与级别进入 NEEDS_INFO / AWAITING_APPROVAL / CODING | 记录 `plan_failed`，CLI/报告明确标为静态降级 |
 | NEEDS_INFO | 用户 `reply` | PLANNING | 追加用户回答到上下文 |
 | AWAITING_APPROVAL | 用户 `approve` | CODING | 记录审批人与时间，可附带计划修改 |
+| AWAITING_APPROVAL | 用户 `reject` | REJECTED | 记录驳回人、理由与时间；不写任何代码 |
+| AWAITING_APPROVAL | 用户 `reject --replan` | PLANNING | 理由并入需求，重新生成计划；M 级仍会再次停在审批门 |
 | CODING | 编码完成 | VERIFYING | 生成 diff 快照 |
 | CODING | `request_info(questions)` | NEEDS_INFO | 写入 interactions；先处理澄清控制流，不执行同批次其他写操作 |
 | CODING | 策略拦截 / 工具错误次数超限 | NEEDS_HUMAN | — |
@@ -648,7 +650,8 @@ agentdev task create --repo acme/web-app --issue 123 [--issue-repo owner/name]
 agentdev task list [--status NEEDS_HUMAN] [--repo acme/web-app]
 agentdev task status <task-id>
 agentdev task reply <task-id> --text "..."
-agentdev task approve <task-id> [--by NAME]
+agentdev task approve <task-id> [--by NAME] [--plan FILE]
+agentdev task reject <task-id> --reason "..." [--by NAME] [--replan]
 agentdev task resume <task-id>
 agentdev task cancel <task-id> [--reason ...]
 agentdev cost <task-id>
@@ -978,6 +981,7 @@ agentic-devops/
 | ADR-30 | 「PR 上没有检查」必须持续一个宽限期（默认 `max(2×轮询, 30s)`）才能判定为无 CI | PR 创建后第一次 `gh pr checks` 返回空就收尾 | 把基准集接入真实 CI 时立刻复现：`agentdev bench --ci-repo` 第一次运行报告 `ci: none` 并判 DONE，但同一次 PR 的 CI 在 40 秒后跑完且**通过**。原因是刚创建的 PR 与“仓库没有 workflow”在 `gh` 输出上是同一句话。若立刻收尾，等于把尚未开始的检查当成完成——这正是 ADR-22 想禁止的“未运行被当成通过”，只是换了个更隐蔽的入口、并且会直接污染 CI 首次通过率的分子。宽限期结束后仍无检查才记 `ci: none` |
 | ADR-31 | 需求前提核查用**确定性证据注入**，不增加模型调用，也不给规划器搜索工具 | 每次规划额外跑一次“前提审查”模型调用；或让规划器自己 grep | 触发场景是 PR #1：需求要求“补充缓存计价测试”，而 `TestTableComputesCostPerMillionTokens` 在同名基线提交上已断言 cache_read/cache_write，规划→编码→验证→审查四步全部通过，产出一个重复测试。规划器看不到仓库，只能看需求点名的文件，因此无从判断“缺失”是否属实。增加一次模型调用会让每个任务都变贵（包括与前提无关的任务）；给规划器工具则会破坏“强制单一工具调用”的链路（ADR-17/18）。改为在规划前做一次有界遍历：仅当需求同时含“缺失/补充”类主张**且**在说测试/覆盖时，才在测试文件里查需求点名的标识符，命中就注入位置**与文件内容**。只给行号不够——模型无法判断既有断言覆盖了什么，实测在只有位置、没有内容的版本上仍然产出重复测试（`t_20261024_594d1d`，$0.0190）。补上内容后，同一需求在 24 秒、$0.0057 停下并给出 `needs_info`，问题精确到 `cost_test.go:12-14` 与第 19 行的算式 |
 | ADR-33 | 前提核查从“测试缺失”扩展到**现有实现**主张：注入被点名符号的实现位置与代码窗口，仍不增加模型调用 | 只扩充关键词表而不注入实现；或为这类需求单独跑一次模型审查 | ADR-31 要求需求**同时**含“缺失类主张”与“测试语境”才触发，且只搜测试文件。于是更常见的一类需求——“`parse_port` 没处理空字符串”“`slugify` 遇到全大写出错”——拿不到任何现有代码，规划器只能凭需求原文猜，照样可能产出基于错误前提的改动。做法与 ADR-31 同构：需求含否定/改动类表述时，在**非测试源码**里查需求点名的标识符，命中就把位置（优先 `func`/`def` 定义）与命中行前后 25/55 行的窗口注入。判定仍交给模型，系统只提供证据。实测：在 `parse.py` 已显式 `if not s: raise ValueError` 的仓库上，需求声称“没有校验空字符串”，两次运行都停在 `NEEDS_INFO` 并精确指出 `parse.py:9-10`（$0.0021、$0.0015，11 秒）；同一二进制不含该功能时只指出测试重复，未识别实现前提 |
+| ADR-39 | 审批门必须有**拒绝分支**，且拒绝分两种语义（`reject` 终止 / `reject --replan` 退回规划） | 只保留 `approve`，用 `task cancel` 充当拒绝；或让 `reject` 只有终止一种语义 | `AwaitingApproval` 原本只有 `→ CODING` 一条出边，CLI 也只有 `task approve`：「审批」实际上退化成「通知」，人无法否决一个方案。`task cancel` 不能顶替：它是终态 + 清理工作区的破坏性操作，且不记录理由，无法区分「这个方案不行」与「这个任务不要了」。而审批门看的本来就是**计划**，「计划不行，重做」是最常见的驳回意图——只给终止一种语义，等于迫使用户丢弃任务重建。因此拆成两条边：`REJECTED`（终止，与 L 级「不执行」同义）和 `PLANNING`（退回重做，理由并入需求、与 `reply` 同构）。代价是 `--replan` 会让一次驳回花掉一次规划费用；换来的是驳回后**仍然再次停在审批门**（M 级不因「已经重规划过」自动放行），否则驳回一次就等于把门拆了。同时补上两处可见性：`--by` 此前只写进 `approved_by` 而无人渲染，现在显示为「审批人/驳回人」；`task list` 增加 `等待` 列，让「停了三天」和「刚停下」不再长得一样 |
 | ADR-38 | 「验收标准钉死实现写法」只在**规划提示词**里防，不做计划校验硬拒 | 校验失败即拒绝并重新规划；或把它判成 `Invalid` 走 `replanForInvalidAcceptance`；或降级为不阻塞 | 跨文件 M 用例第一次运行时测试全过却被判未满足：规划器 grep 断言 `session\.issued_at = now\(\)`，编码器用局部变量复用时间（`= current`）语义正确却匹配不到，白跑一轮修复，最后只是改了变量名。三种硬手段都更差：**计划校验失败**会落进 `plan_failed` 分支、用 `StaticPlanner` 替换模型计划，等于悄悄削弱验证；**判成 `Invalid`** 会重规划一次、再犯就转 `NEEDS_HUMAN`，把一个能成功的用例推向失败；**降级为不阻塞**则违反 ADR-24（验收标准写错也必须阻塞）。真正该改的是规划输出本身，所以在提示词里给出具体反例：只断言出现了哪个标识符/字面量，不断言赋值或 return 右侧怎么写，行为交给 `test`。代价是这条约束只能靠模型遵守，无法用测试钉住——这一点必须如实记在局限里 |
 | ADR-37 | 基准集必须含 M 级用例，并用 `--auto-approve` 的**合成审批**跑通；合成审批在结果里强制留痕 | 只堆更难的 S 级用例；或让 bench 干脆忽略审批门 | S 级 20 例连续两轮 100%，基准饱和——它能防灾难性回归，不能防质量退化。而 M 级一直被结构性排除：bench 只调用一次 `RunTask`，任务停在 `AWAITING_APPROVAL` 就被记为失败，于是所有用例的措辞都被写得「很安全」。M 是产品价值所在（令牌/鉴权/依赖/迁移/CI），却只有 Fake 后端测过。合成审批的代价是**审批门形同虚设**，所以结果里必须带 `synthetic_approval` 并在表格里显示成 `PASS*`：把「绕开了门」说成「通过了门」正是 ADR-22 与 ADR-36 反复要避免的那类失真。只合成一次而不循环，是为了让「审批后再次停下」这种异常暴露出来，而不是被重试掩盖 |
 | ADR-36 | 基础设施故障（远端不可达、TLS 被重置）的运行**不计入**成功率与人工介入率的分母，单独披露 `blocked` | 一律当成失败；或整体重跑直到网络好转 | 把红 CI 闭环从 1 次扩到 6 次时，本机到 GitHub 的连接成段中断：一次 6 用例运行里 4 个用例在推基线分支时就失败，汇总报出「成功率 17%、人工介入 83%」——但实际只有 2 个用例真正测到了产品行为。这两个数字的用途是衡量能力，掺进「今天网络不好」会让它们失去意义；而「一律重跑」既贵又不可判定何时该停。判定复用推送重试的同一套特征（ADR-35），只把**一个 CI 结论都没拿到**的运行标为 `blocked`：已经跑出红/绿结论的运行提供了真实信号，不能因为后续推送失败就整条剔除。`blocked` 与 `provider_quota` 共用同一字段，因为它们对指标的语义相同：钱可能花了，但能力没被测到 |
@@ -1016,6 +1020,8 @@ stateDiagram-v2
     PLANNING --> AWAITING_APPROVAL: M 级
     PLANNING --> CODING: S 级
     AWAITING_APPROVAL --> CODING: approve
+    AWAITING_APPROVAL --> REJECTED: reject
+    AWAITING_APPROVAL --> PLANNING: reject --replan
     CODING --> VERIFYING
     VERIFYING --> CODING: 失败且可修复
     VERIFYING --> REVIEWING: review.enabled 且模型可用
@@ -1056,7 +1062,7 @@ stateDiagram-v2
 | 提示词 | `internal/*/prompts/*.md`（`go:embed`） | triage / planner / coder / reviewer 的 v1 版本 | 文件名带版本；修改后需通过相关单元与端到端测试 |
 | 事件目录 | §20.1 | 事件类型、发出位置、负载键、是否属于降级 | 新事件必须登记于此；降级类事件必须登记于 `degradationLabels` |
 | 运行产物 | `runs/<task>/report.md`、`events.jsonl`、`artifacts/` | 审计用报告、事件流、命令日志 | 报告章节由 `internal/report` 渲染，章节变化需报告测试 |
-| 决策记录 | §17（ADR-01 至 ADR-38） | 设计决策、备选方案与理由 | 已有 ADR 不得改写结论；推翻需新增 ADR 并注明取代关系 |
+| 决策记录 | §17（ADR-01 至 ADR-39） | 设计决策、备选方案与理由 | 已有 ADR 不得改写结论；推翻需新增 ADR 并注明取代关系 |
 | 限制与待验证项 | §18 | 当前已知限制与线上验证缺口 | 缺口关闭时在同一提交中删除对应条目 |
 | 验收矩阵 | §21 | 每条验收标准、测试映射、状态 | 测试改名或删除时必须同步更新映射 |
 
@@ -1506,7 +1512,7 @@ PR [#25](https://github.com/vinthuy/agentdev-sandbox/pull/25)，Draft、base `be
 **没有 CI 与未知都不进分母**：本仓库早期的 PR #1（`agentic-devops`）就是 `ci: none`，
 它不会被算成“首次通过”，也不会拉低比率——这正是 §23.7 想避免的那种失真。
 
-### 22.7 M 级端到端测量（3 例）
+### 22.7 M 级端到端测量（3 例 + 1 个跨文件）
 
 S 级用例连续两轮 100%，基准已经饱和：它只能防灾难性回归，不能防质量退化。
 另一方面，M 级此前**只有 Fake 后端测过**——`TestLevelMParksForApproval` 断言任务停在
@@ -1587,6 +1593,71 @@ S 级用例连续两轮 100%，基准已经饱和：它只能防灾难性回归�
   仍然没有样本。
 - 样本只有 1 次/例；`py-session-refresh` 的「0 次修复」尤其不能当成稳定值——
   它和「1 次修复」只差一次规划输出。
+
+### 22.8 审批门本身（放行 / 驳回 / 回退）
+
+§22.7 明确承认「审批门没有被验证」。这一节补上：**审批门是人在环的唯一入口，
+如果它只有一条出边，审批就退化成通知。**
+
+#### 发现的问题：审批门是单行道
+
+`state.go` 里 `AwaitingApproval` 只有一个出边（→ `CODING`），CLI 也只有
+`task approve`，没有 `reject`。也就是说：
+
+- 人只能放行，不能否决；
+- `task cancel` 看似可以拒绝，但它是终态 + 清理工作区的破坏性操作，且不记录理由，
+  无法区分「这个方案不行」和「这个任务不要了」；
+- `--by` 写进了 `approved_by` 却没被任何渲染路径读出来——`task status` 看不到审批人，
+  审计时等于不存在（`report.EventDetail` 只读 `reason`）。
+
+#### 补上的行为
+
+| 命令 | 目标状态 | 语义 |
+|---|---|---|
+| `task approve [--plan FILE]` | `CODING` | 放行；可附带修改后的计划（范围只能收紧） |
+| `task reject --reason R` | `REJECTED` | 人工否决，不写代码 |
+| `task reject --reason R --replan` | `PLANNING` | 计划不行，带着理由重做 |
+
+`--reason` 必填：没有理由既无法审计，也无法在 `--replan` 时告诉规划器哪里不行。
+`--replan` 与 `task reply` 同构——理由并入需求文本（`[审批驳回]` 段），规划器下一轮
+能看到完整上下文。驳回后重规划完，任务**仍会再次停在审批门**：M 级不能因为
+「已经重规划过一次」就自动放行，否则驳回一次等于把门拆掉。
+
+`report.EventDetail` 现在会渲染 `审批人 X` / `驳回人 X`，`task list` 新增 `等待` 列，
+让挂起任务的等待时长可见（`AWAITING_APPROVAL` 不再和「刚停下」长得一样）。
+
+#### 真实模型端到端（2026-10-25）
+
+环境：DeepSeek，独立 `AGENTDEV_HOME`，`delivery.enabled: false`，目标仓库是
+sandbox 的本地副本（移除 remote），因此没有推送/PR 副作用。
+
+| 场景 | 结果 |
+|---|---|
+| `task create --level M` → `run` | 停在 `AWAITING_APPROVAL`，退出码 3，**后端未被调用**（$0.0037 只花在分级+规划） |
+| `task reject --reason "..." --by leo` | 状态 `REJECTED`；工作区 `git status` 为空——一个字节的代码都没写；该任务不再被 `run` 取出 |
+| `task reject --replan` → `run` | 回到 `PLANNING`，重新规划后**再次**停在 `AWAITING_APPROVAL` |
+| `task approve --by leo` → `run` | `DONE`，提交 `bd7f6d4`：`return a - b` → `return a + b`，`main` 未被改动 |
+
+驳回理由确实进了规划器，而不只是写进事件：第一次计划摘要只写「将返回表达式从
+`a - b` 改为 `a + b`」；驳回「要同时确认 `test_core.py` 的期望」后，新计划摘要变成
+「并以 `test_core.py` 中现有用例（正数、负数）作为返回值验收标准」。
+时间线上驳回事件显示为
+`AWAITING_APPROVAL → REJECTED  计划里没有说明 add 的调用方兼容性，先不动 · 驳回人 leo`。
+
+#### 仍然没有的：审批超时
+
+任务停在审批门**不会过期**。没有 `approval_timeout` 配置，也没有任何自动升级：
+停三天和停三分钟在系统里完全等价，只能靠人去看 `task list`（所以补了 `等待` 列）。
+
+没有直接加自动超时，是因为「超时之后该怎样」是个需要人定的策略，而不是实现细节：
+
+- **自动放行**绝对不行——M 级的意义就是等人工判断；
+- **自动驳回**会丢掉一份可能可用的计划，且和「人否决」混在同一个 `REJECTED` 里，
+  审计上无法区分；
+- **升级到 `NEEDS_HUMAN`** 最不破坏现状（计划保留、`resume` 可退回审批门），
+  但它把「没人看」变成了另一种挂起状态，需要先确认这是想要的行为。
+
+这一项留作待定，不假装已经解决。
 
 ---
 

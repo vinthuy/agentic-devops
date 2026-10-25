@@ -89,9 +89,15 @@ func EventDetail(e store.Event) string {
 		if ci := payloadString(p, "ci"); ci != "" {
 			return ci + "：" + truncate(payloadString(p, "summary"), 160)
 		}
-		if reason := payloadString(p, "reason"); reason != "" {
-			return truncate(reason, 200)
+		detail := truncate(payloadString(p, "reason"), 200)
+		// 审批门的「谁批的 / 谁否的」必须出现在时间线上：只写进 payload 的话，
+		// --by 在审计时等于不存在（此前 approved_by 就是这样被埋掉的）。
+		if by := payloadString(p, "approved_by"); by != "" {
+			detail = joinSentence(detail, "审批人 "+by)
+		} else if by := payloadString(p, "rejected_by"); by != "" {
+			detail = joinSentence(detail, "驳回人 "+by)
 		}
+		return detail
 	case "fix_requested":
 		source := payloadString(p, "source")
 		if source != "" {
@@ -99,6 +105,17 @@ func EventDetail(e store.Event) string {
 		}
 	}
 	return ""
+}
+
+// joinSentence 把两段说明拼成一行，任一段为空时返回另一段。
+func joinSentence(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	return a + " · " + b
 }
 
 // degradationDetail 从事件负载里挑出对人有用的一句话说明。

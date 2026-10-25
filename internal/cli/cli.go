@@ -35,7 +35,7 @@ import (
 	"agentdev/internal/workspace"
 )
 
-const Version = "0.10.0"
+const Version = "0.11.0"
 
 const (
 	ExitOK    = 0
@@ -235,7 +235,7 @@ func doctorCmd(opts *options) *cobra.Command {
 func taskCmd(opts *options) *cobra.Command {
 	cmd := &cobra.Command{Use: "task", Short: "任务相关命令"}
 	cmd.AddCommand(taskCreateCmd(opts), taskListCmd(opts), taskStatusCmd(opts), taskLogsCmd(opts),
-		taskApproveCmd(opts), taskReplyCmd(opts), taskResumeCmd(opts), taskCancelCmd(opts))
+		taskApproveCmd(opts), taskRejectCmd(opts), taskReplyCmd(opts), taskResumeCmd(opts), taskCancelCmd(opts))
 	return cmd
 }
 
@@ -498,13 +498,14 @@ func taskListCmd(opts *options) *cobra.Command {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\t仓库\t级别\t状态\t修复\t创建时间")
+			fmt.Fprintln(w, "ID\t仓库\t级别\t状态\t等待\t修复\t创建时间")
 			for _, t := range tasks {
 				level := t.Level
 				if level == "" {
 					level = "-"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n", t.ID, t.Repo, level, t.Status, t.FixAttempts, t.CreatedAt)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n", t.ID, t.Repo, level, t.Status,
+					waitLabel(t.Status, t.UpdatedAt, time.Now()), t.FixAttempts, t.CreatedAt)
 			}
 			return w.Flush()
 		},
@@ -512,6 +513,33 @@ func taskListCmd(opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&statusFlag, "status", "", "按状态过滤")
 	cmd.Flags().StringVar(&repoFilter, "repo", "", "按仓库过滤")
 	return cmd
+}
+
+// waitLabel 给出挂起任务已经等了多久。
+//
+// 停在审批门/待澄清/待人工的任务在列表里原本只有一个状态字，「刚停下」和「等了三天」
+// 看起来完全一样——审批门有没有人在看着，从列表里看不出来，而这些状态恰恰都不会自己
+// 往前走。只在挂起状态显示等待时长，其余状态显示 "-"，避免把正常流转的任务也标成等待。
+func waitLabel(status state.Status, updatedAt string, now time.Time) string {
+	if !state.Suspended[status] {
+		return "-"
+	}
+	ts, err := time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		return "-"
+	}
+	d := now.Sub(ts)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
 
 func taskStatusCmd(opts *options) *cobra.Command {
@@ -732,6 +760,79 @@ func taskApproveCmd(opts *options) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&by, "by", "cli", "审批人标识，写入审计事件")
 	cmd.Flags().StringVar(&planPath, "plan", "", "用该 JSON 文件替换计划（可修改验收标准或 allowed_paths）")
+	return cmd
+}
+
+// taskRejectCmd 补上审批门的拒绝分支。
+//
+// 在此之前 AwaitingApproval 只有一条出边（→ CODING），也就是说审批门是单行道：
+// 人只能放行，不能否决。`cancel` 看似能拒绝，但它是终态 + 清理工作区的破坏性操作，
+// 而且不记录理由，无法区分「这个方案不行」和「这个任务不要了」。
+//
+// 默认驳回是终态（Rejected，与「L 级不执行」同一个语义：人工决定不执行）；
+// --replan 则带着理由退回 PLANNING 重新出计划——审批门看的本来就是计划，
+// 「计划不行，重做」是最常见的驳回意图，走终态会让任务只能重建。
+func taskRejectCmd(opts *options) *cobra.Command {
+	var reason, file, by string
+	var replan bool
+	cmd := &cobra.Command{
+		Use:   "reject <task-id>",
+		Short: "驳回 M 级任务的计划（默认终态；--replan 退回规划重新生成）",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, st, task, err := loadTask(cmd, opts)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			if err := requireStatus(task, state.AwaitingApproval); err != nil {
+				return err
+			}
+			if cmd.Flags().Changed("file") {
+				data, rerr := os.ReadFile(file)
+				if rerr != nil {
+					return fail(ExitUsage, "读取驳回理由文件失败: %v", rerr)
+				}
+				reason = string(data)
+			}
+			reason = strings.TrimSpace(reason)
+			if reason == "" {
+				// 没有理由的驳回无法审计，也无法在 --replan 时告诉规划器哪里不行。
+				return fail(ExitUsage, "驳回必须给出理由（用 --reason 或 --file）")
+			}
+			if err := st.RecordInteraction(task.ID, "reject", reason); err != nil {
+				return err
+			}
+			payload := map[string]any{
+				"rejected_by": by,
+				"reason":      truncateForEvent(reason),
+				"replan":      replan,
+			}
+			target := state.Rejected
+			fields := map[string]any{}
+			if replan {
+				target = state.Planning
+				// 与 reply 同构：理由并入需求文本，规划器下一轮能看到完整上下文。
+				fields["requirement"] = task.Requirement + "\n\n[审批驳回]\n" + reason
+			}
+			updated, err := st.Transition(task.ID, task.Version, target, payload, fields)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if replan {
+				fmt.Fprintf(out, "[OK] 已驳回 %s，退回重新规划，状态: %s\n", task.ID, updated.Status)
+				fmt.Fprintln(out, "继续执行: agentdev run --task "+task.ID)
+			} else {
+				fmt.Fprintf(out, "[OK] 已驳回 %s，任务终止，状态: %s\n", task.ID, updated.Status)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "驳回理由（必填，写入审计事件并供 --replan 使用）")
+	cmd.Flags().StringVar(&file, "file", "", "从文件读取驳回理由")
+	cmd.Flags().StringVar(&by, "by", "cli", "驳回人标识，写入审计事件")
+	cmd.Flags().BoolVar(&replan, "replan", false, "不终止任务，带着理由退回 PLANNING 重新生成计划")
 	return cmd
 }
 

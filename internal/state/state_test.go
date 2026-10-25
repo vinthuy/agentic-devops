@@ -9,6 +9,9 @@ func TestAllowedTransitions(t *testing.T) {
 		{Triaging, Rejected},
 		{Planning, Coding},
 		{Planning, AwaitingApproval},
+		{AwaitingApproval, Coding},
+		{AwaitingApproval, Rejected},
+		{AwaitingApproval, Planning},
 		{Coding, Verifying},
 		{Coding, NeedsInfo},
 		{Verifying, Coding},
@@ -44,6 +47,7 @@ func TestForbiddenTransitions(t *testing.T) {
 		{Coding, Done},
 		{Done, Coding},
 		{Rejected, Triaging},
+		{Rejected, AwaitingApproval},
 		{NeedsHuman, NeedsHuman},
 		{AwaitingApproval, Done},
 	}

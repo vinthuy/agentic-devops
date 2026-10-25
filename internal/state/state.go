@@ -46,12 +46,14 @@ var Suspended = set(NeedsInfo, AwaitingApproval, NeedsHuman)
 
 // base 是 SDD 4.2 中的核心转换；通用的 FAILED / CANCELLED / NEEDS_HUMAN 在 build 中补充。
 var base = map[Status]map[Status]bool{
-	Queued:           set(Triaging),
-	Triaging:         set(Rejected, Planning),
-	Rejected:         set(),
-	Planning:         set(NeedsInfo, AwaitingApproval, Coding),
-	NeedsInfo:        set(Planning),
-	AwaitingApproval: set(Coding),
+	Queued:    set(Triaging),
+	Triaging:  set(Rejected, Planning),
+	Rejected:  set(),
+	Planning:  set(NeedsInfo, AwaitingApproval, Coding),
+	NeedsInfo: set(Planning),
+	// 审批门不是单行道：Rejected 是「人工否决，不执行」（与 L 级的语义一致），
+	// Planning 是「计划不行，带着理由重做」。只有 Coding 一条出边意味着人只能点头。
+	AwaitingApproval: set(Coding, Rejected, Planning),
 	Coding:           set(Verifying, NeedsInfo),
 	// Verifying → Planning 用于“验收标准本身不可执行”（例如选择器匹配不到测试）：
 	// 这类失败改代码无法解决，必须重新规划而不是空耗修复轮次。
