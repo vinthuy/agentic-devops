@@ -20,6 +20,9 @@ func writeFixture(t *testing.T, dir string) string {
 	if err := os.WriteFile(filepath.Join(fixture, "check.go"), []byte(testutil.CheckSource), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(fixture, "auth.go"), []byte("package fixture\n\n// 鉴权头解析，以及访问令牌的过期判断。\nfunc parseAuth() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(fixture, "README.md"), []byte("# fixture\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

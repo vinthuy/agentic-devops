@@ -483,6 +483,19 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 	implHits := planning.ImplementationHits(task.Requirement, repo.LocalPath, 4)
 	req.Implementation = implHits
 	req.ImplementationFiles = planning.ImplementationSnippets(repo.LocalPath, implHits, 2, 3000)
+	if len(implHits) == 0 && planning.BehaviorClaim(task.Requirement) {
+		eng, eerr := policy.NewEngine(o.cfg.Policy, repo, repo.LocalPath, nil)
+		var retrieved planning.Retrieval
+		if eerr == nil {
+			retrieved = planning.Retrieve(task.Requirement, repo.LocalPath, eng)
+		}
+		req.RetrievalFiles = retrieved.Files
+		if aerr := o.store.AppendEvent(task.ID, "retrieval_completed", map[string]any{
+			"reads": retrieved.Reads, "bytes": retrieved.Bytes, "hits": len(retrieved.Files),
+		}); aerr != nil {
+			return task, aerr
+		}
+	}
 	// AGENTDEV_DEBUG_CONTEXT 用来回答“规划器到底看没看到这条证据”——
 	// 证据没注入和注入了但模型无视，是两种完全不同的缺陷，只能靠这个区分。
 	// 默认关闭，不影响正常运行与输出。
@@ -498,41 +511,57 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 	// 预测是建议性的：失败不影响任务推进，所以这里不返回错误。
 	o.recordCostForecast(task)
 
-	planner := o.planner
-	planSource := "configured_planner"
-	if planner == nil && o.cfg.Planning.Mode == "auto" && o.model != nil {
-		planner = &planning.ModelPlanner{
-			Client: o.model, Model: o.modelName, MaxTokens: o.maxTokens,
-			OnUsage: func(role string, u llm.Usage) {
-				_ = o.recordUsage(task.ID, role, o.modelName, u)
+	var (
+		plan       planning.Plan
+		planSource string
+		err        error
+	)
+	if req.Unlocated() {
+		plan = planning.Plan{
+			Status:  planning.StatusNeedsInfo,
+			Summary: "只读检索没有定位到相关文件",
+			Questions: []string{
+				"需求描述的行为在仓库里没有匹配到文件。请指出要修改的文件或符号。",
 			},
 		}
-		planSource = "model"
-	} else if planner == nil {
-		planSource = "static"
-	}
-
-	plan, err := planWith(planner, req)
-	if err != nil {
-		if aerr := o.store.AppendEvent(task.ID, "plan_failed", map[string]any{
-			"error":  delivery.RedactText(err.Error()),
-			"reason": "模型规划失败，降级为静态计划",
-		}); aerr != nil {
-			return task, aerr
+		planSource = "retrieval_miss"
+	} else {
+		planner := o.planner
+		planSource = "configured_planner"
+		if planner == nil && o.cfg.Planning.Mode == "auto" && o.model != nil {
+			planner = &planning.ModelPlanner{
+				Client: o.model, Model: o.modelName, MaxTokens: o.maxTokens,
+				OnUsage: func(role string, u llm.Usage) {
+					_ = o.recordUsage(task.ID, role, o.modelName, u)
+				},
+			}
+			planSource = "model"
+		} else if planner == nil {
+			planSource = "static"
 		}
-		if llm.IsQuota(err) {
-			if aerr := o.store.AppendEvent(task.ID, "provider_quota",
-				map[string]any{"error": delivery.RedactText(err.Error())}); aerr != nil {
+
+		plan, err = planWith(planner, req)
+		if err != nil {
+			if aerr := o.store.AppendEvent(task.ID, "plan_failed", map[string]any{
+				"error":  delivery.RedactText(err.Error()),
+				"reason": "模型规划失败，降级为静态计划",
+			}); aerr != nil {
 				return task, aerr
 			}
+			if llm.IsQuota(err) {
+				if aerr := o.store.AppendEvent(task.ID, "provider_quota",
+					map[string]any{"error": delivery.RedactText(err.Error())}); aerr != nil {
+					return task, aerr
+				}
+			}
+			plan, err = planning.StaticPlanner{}.Plan(context.Background(), req)
+			planSource = "static_fallback"
+			if err != nil {
+				return task, err
+			}
+		} else if planner == nil {
+			planSource = "static"
 		}
-		plan, err = planning.StaticPlanner{}.Plan(context.Background(), req)
-		planSource = "static_fallback"
-		if err != nil {
-			return task, err
-		}
-	} else if planner == nil {
-		planSource = "static"
 	}
 	if err := o.store.AppendEvent(task.ID, "plan_ready", map[string]any{"source": planSource}); err != nil {
 		return task, err
