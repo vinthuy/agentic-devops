@@ -230,6 +230,65 @@ func ExpireApprovals(st store.Repository, cfg *config.App) (int, error) {
 	return expireApprovals(st, cfg, time.Now())
 }
 
+// Expiry 是一次到期处理的结果。审批和锁共用这一次调用。
+type Expiry struct {
+	ExpiredApprovals int
+	ExpiredLocks     int
+	Skipped          int
+}
+
+// ExpirePending 处理已到期的审批和锁。run 与 sweep 都调用它，避免两套超时规则。
+func ExpirePending(st store.Repository, cfg *config.App) (Expiry, error) {
+	return expirePending(st, cfg, time.Now())
+}
+
+func expirePending(st store.Repository, cfg *config.App, now time.Time) (Expiry, error) {
+	waiting, err := st.ListTasks(state.AwaitingApproval, "")
+	if err != nil {
+		return Expiry{}, err
+	}
+	approvals, err := expireApprovals(st, cfg, now)
+	if err != nil {
+		return Expiry{}, err
+	}
+	locks, err := st.ListLocks()
+	if err != nil {
+		return Expiry{}, err
+	}
+	expiredLocks, keptLocks, err := releaseExpiredLocks(st, locks, cfg.Policy.TaskTimeoutMinutes, now)
+	if err != nil {
+		return Expiry{}, err
+	}
+	skipped := len(waiting) - approvals + keptLocks
+	if skipped < 0 {
+		skipped = 0
+	}
+	return Expiry{
+		ExpiredApprovals: approvals,
+		ExpiredLocks:     expiredLocks,
+		Skipped:          skipped,
+	}, nil
+}
+
+func releaseExpiredLocks(st store.Repository, locks []store.Lock, timeoutMinutes int, now time.Time) (expired, kept int, err error) {
+	if timeoutMinutes <= 0 {
+		return 0, len(locks), nil
+	}
+	limit := time.Duration(timeoutMinutes) * time.Minute
+	for _, lock := range locks {
+		hb, perr := time.Parse(time.RFC3339, lock.HeartbeatAt)
+		if perr != nil || now.Sub(hb) <= limit {
+			kept++
+			continue
+		}
+		if err = st.DeleteLock(lock.Resource); err != nil {
+			return expired, kept, err
+		}
+		expired++
+	}
+	return expired, kept, nil
+}
+
 func expireApprovals(st store.Repository, cfg *config.App, now time.Time) (int, error) {
 	minutes := cfg.Policy.ApprovalTimeoutMinutes
 	if minutes <= 0 {

@@ -196,6 +196,14 @@ type Interaction struct {
 	Content string `json:"content"`
 }
 
+// Lock 是一把按资源占用的调度锁。当前单进程执行不获取它；sweep 会释放心跳过期的锁。
+type Lock struct {
+	Resource    string
+	TaskID      string
+	AcquiredAt  string
+	HeartbeatAt string
+}
+
 // Repository 是任务持久化的抽象。当前实现为 SQLite，后续可增加 PostgreSQL 实现。
 type Repository interface {
 	CreateTask(t NewTask) (Task, error)
@@ -217,6 +225,9 @@ type Repository interface {
 	AddSpend(taskID string, delta float64) error
 	RecordInteraction(taskID, kind, content string) error
 	ListInteractions(taskID string) ([]Interaction, error)
+	PutLock(resource, taskID, heartbeat string) error
+	ListLocks() ([]Lock, error)
+	DeleteLock(resource string) error
 	Close() error
 }
 
@@ -808,4 +819,34 @@ func (s *SQLiteStore) ListInteractions(taskID string) ([]Interaction, error) {
 		out = append(out, i)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQLiteStore) PutLock(resource, taskID, heartbeat string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO locks (resource, task_id, acquired_at, heartbeat_at) VALUES (?,?,?,?)
+		ON CONFLICT(resource) DO UPDATE SET task_id = excluded.task_id, heartbeat_at = excluded.heartbeat_at`,
+		resource, taskID, heartbeat, heartbeat)
+	return err
+}
+
+func (s *SQLiteStore) ListLocks() ([]Lock, error) {
+	rows, err := s.db.Query(`SELECT resource, task_id, acquired_at, heartbeat_at FROM locks ORDER BY resource`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Lock
+	for rows.Next() {
+		var lock Lock
+		if err := rows.Scan(&lock.Resource, &lock.TaskID, &lock.AcquiredAt, &lock.HeartbeatAt); err != nil {
+			return nil, err
+		}
+		out = append(out, lock)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) DeleteLock(resource string) error {
+	_, err := s.db.Exec(`DELETE FROM locks WHERE resource = ?`, resource)
+	return err
 }

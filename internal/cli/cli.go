@@ -74,7 +74,7 @@ func NewRoot() *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.home, "home", "", "数据目录，默认读取 AGENTDEV_HOME 或 ~/.agentdev")
 
 	root.AddCommand(versionCmd(), configCmd(opts), doctorCmd(opts), taskCmd(opts), runCmd(opts),
-		costCmd(opts), benchCmd(opts))
+		sweepCmd(opts), costCmd(opts), benchCmd(opts))
 	return root
 }
 
@@ -1441,10 +1441,10 @@ func runCmd(opts *options) *cobra.Command {
 			// 停在审批门的任务不在 RunnableStatuses 里，不会被下面取到。
 			// 因此超时升级必须在选任务之前做一次，否则等太久的任务永远停在原地。
 			// 它只需要 store 和策略，不需要后端，所以放在构造后端之前。
-			if n, xerr := orchestrator.ExpireApprovals(st, cfg); xerr != nil {
+			if result, xerr := orchestrator.ExpirePending(st, cfg); xerr != nil {
 				return xerr
-			} else if n > 0 {
-				fmt.Fprintf(out, "审批超时：%d 个任务已升级为 NEEDS_HUMAN（可用 task resume 送回审批门）\n", n)
+			} else if result.ExpiredApprovals > 0 {
+				fmt.Fprintf(out, "审批超时：%d 个任务已升级为 NEEDS_HUMAN（可用 task resume 送回审批门）\n", result.ExpiredApprovals)
 			}
 
 			// 先确认有活可干，再构造后端：没有任务时不应因为缺少 API key 而失败。
