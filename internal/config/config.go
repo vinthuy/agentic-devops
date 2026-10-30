@@ -77,8 +77,18 @@ type ModelsConfig struct {
 	MaxTokens int    `yaml:"max_tokens"`
 	BaseURL   string `yaml:"base_url"`
 	APIKeyEnv string `yaml:"api_key_env"`
+	// Roles 把角色名映射到同一端点上的模型名。未写的角色使用 Model。
+	Roles map[string]string `yaml:"roles"`
 	// Pricing 按模型名配置每百万 token 单价（美元）。
 	Pricing map[string]PricingConfig `yaml:"pricing"`
+}
+
+// RoleModel 返回角色实际使用的模型。空值或未配置的角色回落到默认模型。
+func (m ModelsConfig) RoleModel(role string) string {
+	if name := strings.TrimSpace(m.Roles[role]); name != "" {
+		return name
+	}
+	return m.Model
 }
 
 // PricingConfig 为每百万 token 的单价（美元）。

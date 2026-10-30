@@ -169,3 +169,45 @@ func TestModelReviewerParsesStructuredToolCall(t *testing.T) {
 		t.Errorf("CI 失败输出未进入上下文: %q", seenUserContent)
 	}
 }
+
+func TestReviewerSeesAgentsFileAsUntrusted(t *testing.T) {
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if len(req.Messages) > 0 {
+			seen = req.Messages[0].Content
+		}
+		resp := map[string]any{
+			"content": []any{map[string]any{
+				"type": "tool_use", "id": "tu_1", "name": "submit_review",
+				"input": map[string]any{
+					"decision": "approve", "summary": "可以", "findings": []any{},
+				},
+			}},
+			"stop_reason": "tool_use",
+			"usage":       map[string]any{"input_tokens": 1, "output_tokens": 1},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	_, err := (&ModelReviewer{
+		Client: llm.NewClient(srv.URL, "k"), Model: "m", MaxTokens: 256,
+	}).Review(context.Background(), Input{
+		Requirement: "写 hello.txt",
+		Diff:        "diff --git a/hello.txt b/hello.txt\n",
+		AgentsMD:    "来源：仓库文件 AGENTS.md\n先写测试。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(seen, "先写测试") || !strings.Contains(seen, `trusted="false"`) || !strings.Contains(seen, "AGENTS.md") {
+		t.Fatalf("审查上下文应把仓库文件标成不可信: %q", seen)
+	}
+}

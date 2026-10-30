@@ -239,6 +239,8 @@ type Requirement struct {
 	// RetrievalFiles 是符号查找没有命中时，只读检索得到的摘录。
 	// 内容来自仓库文件，渲染时必须标成不可信数据。
 	RetrievalFiles map[string]string
+	// AgentsMD 是仓库根目录 AGENTS.md 的有界文本。空表示文件不存在。
+	AgentsMD string
 }
 
 // Planner 生成实施计划。
@@ -264,6 +266,9 @@ func (p *ModelPlanner) Plan(ctx context.Context, req Requirement) (Plan, error) 
 	var b strings.Builder
 	source, trusted := requirementTag(req.Source)
 	fmt.Fprintf(&b, "<task_requirement source=\"%s\" trusted=\"%t\">\n%s\n</task_requirement>\n\n", source, trusted, req.Text)
+	if req.AgentsMD != "" {
+		fmt.Fprintf(&b, "<agents_md trusted=\"false\">\n%s\n</agents_md>\n\n", req.AgentsMD)
+	}
 	if req.Feedback != "" {
 		fmt.Fprintf(&b, "<plan_feedback trusted=\"true\">\n%s\n</plan_feedback>\n\n", req.Feedback)
 	}

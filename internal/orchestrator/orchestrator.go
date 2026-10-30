@@ -41,6 +41,7 @@ type Orchestrator struct {
 	// 模型相关（可选）。为 nil 时退化为纯规则 + 静态计划，可完全离线运行。
 	model         *llm.Client
 	modelName     string
+	roleModels    map[string]string
 	maxTokens     int
 	pricing       cost.Table
 	planner       planning.Planner
@@ -113,6 +114,14 @@ func WithCINoneGrace(d time.Duration) Option {
 // WithReviewPoster 在审查状态转移之后把结论发表到草稿 PR。为 nil 时不发表。
 func WithReviewPoster(p delivery.ReviewPoster) Option {
 	return func(o *Orchestrator) { o.reviewPoster = p }
+}
+
+// WithRoleModels 为个别角色指定模型名。未列出的角色使用 WithModel 的默认模型。
+// 所有角色仍共用同一个客户端，也就是同一份端点和密钥。
+func WithRoleModels(roles map[string]string) Option {
+	return func(o *Orchestrator) {
+		o.roleModels = roles
+	}
 }
 
 // WithIssueCommenter 在进入审批门和终态后回写来源 Issue。为 nil 时不回写。
@@ -206,6 +215,13 @@ func (o *Orchestrator) RunTask(taskID string) (store.Task, error) {
 		return task, fmt.Errorf("写入运行报告失败: %w", rerr)
 	}
 	return task, nil
+}
+
+func (o *Orchestrator) modelFor(role string) string {
+	if name := strings.TrimSpace(o.roleModels[role]); name != "" {
+		return name
+	}
+	return o.modelName
 }
 
 func runnableStatus(s state.Status) bool {
@@ -408,10 +424,10 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 		result = triage.Rules(task.Requirement, repo)
 		if o.cfg.Triage.UseModel && o.model != nil && result.Level < triage.L {
 			est, eerr := (&triage.ModelEstimator{
-				Client: o.model, Model: o.modelName, MaxTokens: o.maxTokens,
+				Client: o.model, Model: o.modelFor("triage"), MaxTokens: o.maxTokens,
 			}).Estimate(context.Background(), task.Requirement, repo, task.Source)
 			if eerr != nil {
-				if uerr := o.recordUsage(task.ID, "triage", o.modelName, est.Usage); uerr != nil {
+				if uerr := o.recordUsage(task.ID, "triage", o.modelFor("triage"), est.Usage); uerr != nil {
 					return task, uerr
 				}
 				// 分级失败不应阻断任务：记录后按规则结果继续。
@@ -426,7 +442,7 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 					}
 				}
 			} else {
-				if uerr := o.recordUsage(task.ID, "triage", o.modelName, est.Usage); uerr != nil {
+				if uerr := o.recordUsage(task.ID, "triage", o.modelFor("triage"), est.Usage); uerr != nil {
 					return task, uerr
 				}
 				result = triage.Combine(result, est)
@@ -496,6 +512,11 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 			return task, aerr
 		}
 	}
+	agents, aerr := planning.LoadAgentsMD(repo.LocalPath)
+	if aerr != nil {
+		return task, aerr
+	}
+	req.AgentsMD = agents
 	// AGENTDEV_DEBUG_CONTEXT 用来回答“规划器到底看没看到这条证据”——
 	// 证据没注入和注入了但模型无视，是两种完全不同的缺陷，只能靠这个区分。
 	// 默认关闭，不影响正常运行与输出。
@@ -530,9 +551,9 @@ func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.
 		planSource = "configured_planner"
 		if planner == nil && o.cfg.Planning.Mode == "auto" && o.model != nil {
 			planner = &planning.ModelPlanner{
-				Client: o.model, Model: o.modelName, MaxTokens: o.maxTokens,
+				Client: o.model, Model: o.modelFor("planner"), MaxTokens: o.maxTokens,
 				OnUsage: func(role string, u llm.Usage) {
-					_ = o.recordUsage(task.ID, role, o.modelName, u)
+					_ = o.recordUsage(task.ID, role, o.modelFor(role), u)
 				},
 			}
 			planSource = "model"
@@ -913,11 +934,15 @@ func (o *Orchestrator) reviewStep(task store.Task, repo config.RepoConfig) (stor
 	reviewer := o.reviewer
 	if reviewer == nil {
 		reviewer = &review.ModelReviewer{
-			Client: o.model, Model: o.modelName, MaxTokens: o.maxTokens,
+			Client: o.model, Model: o.modelFor("reviewer"), MaxTokens: o.maxTokens,
 			OnUsage: func(role string, u llm.Usage) {
-				_ = o.recordUsage(task.ID, role, o.modelName, u)
+				_ = o.recordUsage(task.ID, role, o.modelFor(role), u)
 			},
 		}
+	}
+	agents, aerr := planning.LoadAgentsMD(repo.LocalPath)
+	if aerr != nil {
+		return task, aerr
 	}
 	verdict, err := reviewer.Review(context.Background(), review.Input{
 		Source:      task.Source,
@@ -926,6 +951,7 @@ func (o *Orchestrator) reviewStep(task store.Task, repo config.RepoConfig) (stor
 		Diff:        diff,
 		Acceptance:  acceptanceSummary(o.store, task.ID),
 		CIFailure:   ciFailureEvidenceOf(o.store, task.ID),
+		AgentsMD:    agents,
 	})
 	if err == nil {
 		// 即便替换成自定义 Reviewer，也必须经过同一套程序侧校验；
@@ -1364,7 +1390,7 @@ func (o *Orchestrator) pollWait(deadline time.Time) time.Duration {
 
 func (o *Orchestrator) usageHook(taskID, role string) func(llm.Usage) error {
 	return func(u llm.Usage) error {
-		if err := o.recordUsage(taskID, role, o.modelName, u); err != nil {
+		if err := o.recordUsage(taskID, role, o.modelFor(role), u); err != nil {
 			return err
 		}
 		return o.checkBudget(taskID)

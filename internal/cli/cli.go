@@ -1858,8 +1858,10 @@ func buildOrchestrator(cfg *config.App, st store.Repository, backendName, script
 		if key == "" {
 			return nil, fail(ExitUsage, "未设置环境变量 %s（见 models.yaml 的 api_key_env）", cfg.Models.APIKeyEnv)
 		}
+		client := llm.NewClient(cfg.Models.BaseURL, key)
 		opts = append(opts, orchestrator.WithModel(
-			llm.NewClient(cfg.Models.BaseURL, key), cfg.Models.Model, cfg.Models.MaxTokens, pricingTable(cfg)))
+			client, cfg.Models.Model, cfg.Models.MaxTokens, pricingTable(cfg)))
+		opts = append(opts, orchestrator.WithRoleModels(cfg.Models.Roles))
 	}
 	if push {
 		opts = append(opts, orchestrator.WithDelivery(true))
@@ -1887,7 +1889,7 @@ func makeBackend(cfg *config.App, name, scriptPath string) (backend.ExecutionBac
 			return nil, fail(ExitUsage, "未设置环境变量 %s（见 models.yaml 的 api_key_env）", cfg.Models.APIKeyEnv)
 		}
 		return backend.NewAnthropic(
-			llm.NewClient(cfg.Models.BaseURL, key), cfg.Models.Model, cfg.Models.MaxTokens), nil
+			llm.NewClient(cfg.Models.BaseURL, key), cfg.Models.RoleModel("coder"), cfg.Models.MaxTokens), nil
 	case "fake":
 		if scriptPath == "" {
 			return nil, fail(ExitUsage, "fake 后端需要 --script 指定脚本文件")

@@ -130,6 +130,8 @@ type Input struct {
 	// 入参校验」判成超范围的画蛇添足，进而要求回退——那会把唯一能让 CI 变绿
 	// 的改动撤掉，任务必然转人工。
 	CIFailure string
+	// AgentsMD 是仓库文件 AGENTS.md 的有界文本，不是系统指令。
+	AgentsMD string
 }
 
 // Reviewer 审查一次改动。
@@ -162,6 +164,9 @@ func (m *ModelReviewer) Review(ctx context.Context, in Input) (Review, error) {
 		source, trusted = "issue", false
 	}
 	fmt.Fprintf(&b, "<task_requirement source=\"%s\" trusted=\"%t\">\n%s\n</task_requirement>\n\n", source, trusted, in.Requirement)
+	if in.AgentsMD != "" {
+		fmt.Fprintf(&b, "<agents_md trusted=\"false\">\n%s\n</agents_md>\n\n", in.AgentsMD)
+	}
 	if in.Plan != "" {
 		fmt.Fprintf(&b, "<plan trusted=\"true\">\n%s\n</plan>\n\n", in.Plan)
 	}
