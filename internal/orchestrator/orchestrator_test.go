@@ -202,13 +202,16 @@ func TestTamperingWithVerifyConfigNeedsHuman(t *testing.T) {
 	}
 }
 
-func TestLevelLRejectedWithoutRunningBackend(t *testing.T) {
+func TestLevelLWithoutASplitStopsForAHuman(t *testing.T) {
 	f := setup(t)
 	task := f.task("L")
 	be := backend.NewFake(nil)
 	done := f.run(be, task.ID)
-	if done.Status != state.Rejected {
-		t.Fatalf("应为 REJECTED，实际 %s", done.Status)
+	if done.Status != state.NeedsHuman {
+		t.Fatalf("应为 NEEDS_HUMAN，实际 %s（%s）", done.Status, lastReason(t, f.st, task.ID))
+	}
+	if lastReason(t, f.st, task.ID) != "拆分失败" {
+		t.Fatalf("没有可用拆分时应说明拆分失败，实际 %s", lastReason(t, f.st, task.ID))
 	}
 	if len(be.Calls) != 0 {
 		t.Error("L 级任务不应调用后端")

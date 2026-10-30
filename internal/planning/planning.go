@@ -65,6 +65,8 @@ type Plan struct {
 	Acceptance       []Acceptance `json:"acceptance,omitempty"`
 	RiskFlags        []string     `json:"risk_flags,omitempty"`
 	EstimatedCostUSD float64      `json:"estimated_cost_usd,omitempty"`
+	// SliceIndex 是这段在父任务拆分计划中的序号，从 0 开始。普通计划保持 0。
+	SliceIndex int `json:"slice_index,omitempty"`
 }
 
 func (p Plan) NeedsInfo() bool { return p.Status == StatusNeedsInfo }

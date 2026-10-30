@@ -45,6 +45,7 @@ type Orchestrator struct {
 	maxTokens     int
 	pricing       cost.Table
 	planner       planning.Planner
+	splitter      planning.Splitter
 	reviewer      review.Reviewer
 	codeHost      delivery.CodeHost
 	issueComments issuegate.Commenter
@@ -75,6 +76,11 @@ func WithModel(client *llm.Client, model string, maxTokens int, pricing cost.Tab
 		o.maxTokens = maxTokens
 		o.pricing = pricing
 	}
+}
+
+// WithSplitter 覆盖 L 级拆段。为 nil 且配置了模型时使用模型拆段。
+func WithSplitter(s planning.Splitter) Option {
+	return func(o *Orchestrator) { o.splitter = s }
 }
 
 // WithPlanner 覆盖默认的规划器（测试用）。
@@ -461,11 +467,6 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 		"reasons":    result.Reasons,
 		"model_used": result.ModelUsed,
 	}
-	if result.Level == triage.L {
-		return o.move(task, state.Rejected, mergePayload(payload, map[string]any{
-			"reason": "L 级任务不自动执行，请拆分为 S/M 级子任务",
-		}), map[string]any{"level": result.Level.String()})
-	}
 	task, err = o.move(task, state.Planning, payload,
 		map[string]any{"level": result.Level.String()})
 	if err != nil {
@@ -479,6 +480,9 @@ func (o *Orchestrator) triageStep(task store.Task, repo config.RepoConfig) (stor
 
 // planStep 生成结构化计划。需求不清时进入 NEEDS_INFO；M 级任务进入 AWAITING_APPROVAL。
 func (o *Orchestrator) planStep(task store.Task, repo config.RepoConfig) (store.Task, error) {
+	if task.Level == triage.L.String() {
+		return o.splitLevel(task, repo)
+	}
 	coverage := planning.ExistingCoverage(task.Requirement, repo.LocalPath, 8)
 	req := planning.Requirement{
 		TaskID:       task.ID,
@@ -1498,6 +1502,11 @@ func (o *Orchestrator) move(task store.Task, to state.Status, payload map[string
 		return task, err
 	}
 	o.notifyIssue(updated)
+	if to == state.Done {
+		if nerr := o.advanceSplit(updated); nerr != nil {
+			return updated, nerr
+		}
+	}
 	return updated, nil
 }
 

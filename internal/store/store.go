@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     requirement     TEXT NOT NULL,
     source          TEXT NOT NULL DEFAULT 'cli',
     source_ref      TEXT,
+    parent_task_id  TEXT,
     level           TEXT,
     level_override  INTEGER NOT NULL DEFAULT 0,
     status          TEXT NOT NULL,
@@ -141,6 +142,7 @@ type Task struct {
 	CreatedAt      string
 	UpdatedAt      string
 	FinishedAt     string
+	ParentTaskID   string
 }
 
 type NewTask struct {
@@ -152,6 +154,7 @@ type NewTask struct {
 	Title         string
 	Source        string
 	SourceRef     string
+	ParentTaskID  string
 }
 
 type Event struct {
@@ -264,6 +267,7 @@ var requiredColumns = []struct {
 	ddl  string
 }{
 	{"review_attempts", "ALTER TABLE tasks ADD COLUMN review_attempts INTEGER NOT NULL DEFAULT 0"},
+	{"parent_task_id", "ALTER TABLE tasks ADD COLUMN parent_task_id TEXT"},
 }
 
 func migrateColumns(db *sql.DB) error {
@@ -324,10 +328,10 @@ func (s *SQLiteStore) CreateTask(t NewTask) (Task, error) {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(
-		`INSERT INTO tasks (id, repo, title, requirement, source, source_ref, level, level_override, status,
-		 budget_usd, version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?)`,
+		`INSERT INTO tasks (id, repo, title, requirement, source, source_ref, parent_task_id, level, level_override, status,
+		 budget_usd, version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?)`,
 		id, t.Repo, nullable(t.Title), t.Requirement, orDefault(t.Source, "cli"),
-		nullable(t.SourceRef), nullable(t.Level), boolInt(t.LevelOverride), string(state.Queued),
+		nullable(t.SourceRef), nullable(t.ParentTaskID), nullable(t.Level), boolInt(t.LevelOverride), string(state.Queued),
 		t.BudgetUSD, ts, ts,
 	); err != nil {
 		return Task{}, err
@@ -350,7 +354,8 @@ func orDefault(v, d string) string {
 
 const taskColumns = `id, repo, title, requirement, source, source_ref, level, level_override, status,
 	previous_status, plan_json, branch, worktree_path, base_sha, commit_sha, pr_number, pr_url,
-	fix_attempts, ci_attempts, review_attempts, budget_usd, spent_usd, version, created_at, updated_at, finished_at`
+	fix_attempts, ci_attempts, review_attempts, budget_usd, spent_usd, version, created_at, updated_at, finished_at,
+	parent_task_id`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -360,7 +365,7 @@ func scanTask(r rowScanner) (Task, error) {
 	var (
 		t                                               Task
 		title, sourceRef, level, prev, plan, branch, wt sql.NullString
-		base, commit, prURL, finished                   sql.NullString
+		base, commit, prURL, finished, parent           sql.NullString
 		prNumber                                        sql.NullInt64
 		levelOverride                                   int64
 		status                                          string
@@ -368,7 +373,7 @@ func scanTask(r rowScanner) (Task, error) {
 	err := r.Scan(&t.ID, &t.Repo, &title, &t.Requirement, &t.Source, &sourceRef, &level, &levelOverride,
 		&status, &prev, &plan, &branch, &wt, &base, &commit, &prNumber, &prURL,
 		&t.FixAttempts, &t.CIAttempts, &t.ReviewAttempts, &t.BudgetUSD, &t.SpentUSD,
-		&t.Version, &t.CreatedAt, &t.UpdatedAt, &finished)
+		&t.Version, &t.CreatedAt, &t.UpdatedAt, &finished, &parent)
 	if err != nil {
 		return Task{}, err
 	}
@@ -386,6 +391,7 @@ func scanTask(r rowScanner) (Task, error) {
 	t.PRNumber = prNumber.Int64
 	t.PRURL = prURL.String
 	t.FinishedAt = finished.String
+	t.ParentTaskID = parent.String
 	return t, nil
 }
 
