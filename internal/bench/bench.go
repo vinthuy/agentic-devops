@@ -407,8 +407,9 @@ func runCase(ctx context.Context, manifestDir, baseDir string, c Case, run int, 
 		}
 		if opts.CI != nil {
 			outcome.CIVerdict = ciVerdict(events)
-			// “首次即通过”要求真的跑过检查，且全程没有因为 CI 失败回过炉。
-			outcome.CIFirstPass = outcome.CIVerdict == "passed" && result.CIAttempts == 0
+			// 首次通过要求结论是通过、没有回修，并且事件里没有 CI 失败。
+			// 额外检查失败过一次，就不能靠清零次数把它记成首次通过。
+			outcome.CIFirstPass = ciFirstPassAllowed(outcome.CIVerdict, result.CIAttempts, events)
 		}
 		// 只有「一个 CI 结论都没拿到」才把网络故障算作阻断：已经跑出红/绿结论的
 		// 运行提供了真实信号，不能因为后续推送失败就整条剔除。

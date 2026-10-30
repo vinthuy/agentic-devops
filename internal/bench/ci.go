@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"agentdev/internal/delivery"
+	"agentdev/internal/store"
 	"agentdev/internal/workspace"
 )
 
@@ -149,6 +150,55 @@ func sanitizeBranch(s string) string {
 		out = "case"
 	}
 	return out
+}
+
+// ciOnlyChecks 返回 workflow 里出现、但本地验证命令没有点名的测试文件。
+// 同一批命令的 workflow 不写这些文件，因此返回空，既有结论保持不变。
+func ciOnlyChecks(workflow string, local []string) []string {
+	localText := strings.Join(local, "\n")
+	seen := map[string]bool{}
+	var out []string
+	rest := workflow
+	for {
+		i := strings.Index(rest, "test_")
+		if i < 0 {
+			break
+		}
+		rest = rest[i:]
+		end := 0
+		for end < len(rest) && (rest[end] == '_' || rest[end] == '.' ||
+			(rest[end] >= 'a' && rest[end] <= 'z') ||
+			(rest[end] >= 'A' && rest[end] <= 'Z') ||
+			(rest[end] >= '0' && rest[end] <= '9')) {
+			end++
+		}
+		name := rest[:end]
+		rest = rest[end:]
+		if !strings.HasSuffix(name, ".py") || seen[name] || strings.Contains(localText, name) {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+// ciFirstPassAllowed 判断这次运行能否记入 CI 首次通过。
+// 本地验证通过并不能抵消 workflow 里额外检查的失败；事件里出现过 CI 失败，
+// 即使尝试次数后来被清零，也不再算首次通过。没有失败记录的通过保持原结论。
+func ciFirstPassAllowed(verdict string, attempts int, events []store.Event) bool {
+	if verdict != "passed" || attempts != 0 {
+		return false
+	}
+	for _, e := range events {
+		if e.Type == "ci_failed" {
+			return false
+		}
+		if e.Type == "fix_requested" && e.Payload["source"] == "ci" {
+			return false
+		}
+	}
+	return true
 }
 
 // writeCIWorkflow 把 CI 定义写进仓库，随 fixture 一起提交到基线分支。
