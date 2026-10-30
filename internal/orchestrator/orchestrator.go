@@ -47,6 +47,7 @@ type Orchestrator struct {
 	reviewer      review.Reviewer
 	codeHost      delivery.CodeHost
 	issueComments issuegate.Commenter
+	reviewPoster  delivery.ReviewPoster
 	ciWatcher     delivery.CIWatcher
 	ciPoll        time.Duration
 	ciTimeout     time.Duration
@@ -107,6 +108,11 @@ func WithCITiming(poll, timeout time.Duration) Option {
 // 这是为了区分“PR 刚创建、检查还没注册”与“仓库真的没有 CI”。
 func WithCINoneGrace(d time.Duration) Option {
 	return func(o *Orchestrator) { o.ciNoneGrace = d }
+}
+
+// WithReviewPoster 在审查状态转移之后把结论发表到草稿 PR。为 nil 时不发表。
+func WithReviewPoster(p delivery.ReviewPoster) Option {
+	return func(o *Orchestrator) { o.reviewPoster = p }
 }
 
 // WithIssueCommenter 在进入审批门和终态后回写来源 Issue。为 nil 时不回写。
@@ -860,20 +866,20 @@ func (o *Orchestrator) reviewStep(task store.Task, repo config.RepoConfig) (stor
 	}
 
 	if verdict.Approved() {
-		return o.move(task, state.Committing, map[string]any{
+		return o.finishReview(task, state.Committing, map[string]any{
 			"review":   "approve",
 			"summary":  verdict.Summary,
 			"findings": len(verdict.Findings),
-		}, nil)
+		}, nil, verdict)
 	}
 
 	attempts := task.ReviewAttempts + 1
 	if attempts > o.cfg.Policy.MaxReviewAttempts {
-		return o.move(task, state.NeedsHuman, map[string]any{
+		return o.finishReview(task, state.NeedsHuman, map[string]any{
 			"reason":          fmt.Sprintf("审查未通过且已达上限（%d 次）", o.cfg.Policy.MaxReviewAttempts),
 			"last_failure":    truncateRunes(verdict.Format(), 2000),
 			"review_findings": reviewFindings(verdict),
-		}, nil)
+		}, nil, verdict)
 	}
 	if aerr := o.store.AppendEvent(task.ID, "fix_requested", map[string]any{
 		"attempt": attempts,
@@ -882,12 +888,46 @@ func (o *Orchestrator) reviewStep(task store.Task, repo config.RepoConfig) (stor
 	}); aerr != nil {
 		return task, aerr
 	}
-	return o.move(task, state.Coding, map[string]any{
+	return o.finishReview(task, state.Coding, map[string]any{
 		"review":   "request_changes",
 		"attempt":  attempts,
 		"summary":  verdict.Summary,
 		"findings": reviewFindings(verdict),
-	}, map[string]any{"review_attempts": attempts})
+	}, map[string]any{"review_attempts": attempts}, verdict)
+}
+
+// finishReview 先完成状态转移，再发表 PR review。发表失败不回滚。
+func (o *Orchestrator) finishReview(task store.Task, to state.Status, payload, fields map[string]any, verdict review.Review) (store.Task, error) {
+	updated, err := o.move(task, to, payload, fields)
+	if err != nil {
+		return task, err
+	}
+	o.publishReview(updated, verdict)
+	return updated, nil
+}
+
+// publishReview 把已经生效的结论写到草稿 PR。没有 PR 时直接返回。
+func (o *Orchestrator) publishReview(task store.Task, verdict review.Review) {
+	if task.PRNumber <= 0 {
+		return
+	}
+	if o.reviewPoster == nil {
+		_ = o.store.AppendEvent(task.ID, "review_post_failed", map[string]any{
+			"error": "未配置 PR review 发表",
+		})
+		return
+	}
+	err := o.reviewPoster.PostReview(context.Background(), task.WorktreePath, task.PRNumber, delivery.BuildPullReview(verdict))
+	if err != nil {
+		_ = o.store.AppendEvent(task.ID, "review_post_failed", map[string]any{
+			"error": truncateRunes(delivery.RedactText(err.Error()), 2000),
+		})
+		return
+	}
+	_ = o.store.AppendEvent(task.ID, "review_posted", map[string]any{
+		"pr_url":   task.PRURL,
+		"decision": string(verdict.Decision),
+	})
 }
 
 // ciFailureEvidence 返回「当前这轮改动正在修的那次 CI 失败」。

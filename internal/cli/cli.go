@@ -1865,6 +1865,7 @@ func buildOrchestrator(cfg *config.App, st store.Repository, backendName, script
 		opts = append(opts, orchestrator.WithDelivery(true))
 	}
 	opts = append(opts, orchestrator.WithIssueCommenter(ghIssueClient{}))
+	opts = append(opts, orchestrator.WithReviewPoster(delivery.GHCli{}))
 	return orchestrator.New(st, cfg, be, opts...), nil
 }
 
