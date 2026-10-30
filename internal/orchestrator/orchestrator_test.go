@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -308,5 +309,43 @@ func TestUnknownRepoFailsTask(t *testing.T) {
 	done := f.run(backend.NewFake(nil), task.ID)
 	if done.Status != state.Failed {
 		t.Errorf("应为 FAILED，实际 %s", done.Status)
+	}
+}
+
+type failComments struct{}
+
+func (failComments) Post(context.Context, string, string, int64, string) (string, error) {
+	return "", errors.New("issue api down")
+}
+
+func TestPlanCommentFailureKeepsAwaitingApproval(t *testing.T) {
+	f := setup(t)
+	task, err := f.st.CreateTask(store.NewTask{
+		Repo: "acme/app", Requirement: "在仓库根目录创建 hello.txt，内容为 hello",
+		BudgetUSD: 2, Level: "M", LevelOverride: true,
+		Source: "issue", SourceRef: "https://github.com/acme/app/issues/12",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := New(f.st, f.cfg, backend.NewFake([][]backend.ToolCall{good}), WithIssueCommenter(failComments{})).RunTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != state.AwaitingApproval {
+		t.Fatalf("计划回写失败后应仍在审批门，实际 %s", done.Status)
+	}
+	events, err := f.st.ListEvents(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Type == "github_comment_failed" && e.Payload["kind"] == "plan" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("应记录 plan 回写失败")
 	}
 }

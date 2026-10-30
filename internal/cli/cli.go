@@ -25,6 +25,7 @@ import (
 	"agentdev/internal/cost"
 	"agentdev/internal/delivery"
 	"agentdev/internal/forecast"
+	"agentdev/internal/issuegate"
 	"agentdev/internal/llm"
 	"agentdev/internal/orchestrator"
 	"agentdev/internal/planning"
@@ -235,7 +236,8 @@ func doctorCmd(opts *options) *cobra.Command {
 func taskCmd(opts *options) *cobra.Command {
 	cmd := &cobra.Command{Use: "task", Short: "任务相关命令"}
 	cmd.AddCommand(taskCreateCmd(opts), taskListCmd(opts), taskStatusCmd(opts), taskLogsCmd(opts),
-		taskApproveCmd(opts), taskRejectCmd(opts), taskReplyCmd(opts), taskResumeCmd(opts), taskCancelCmd(opts))
+		taskApproveCmd(opts), taskRejectCmd(opts), taskReplyCmd(opts), taskResumeCmd(opts), taskCancelCmd(opts),
+		taskSyncIssueCmd(opts))
 	return cmd
 }
 
@@ -747,7 +749,7 @@ func taskApproveCmd(opts *options) *cobra.Command {
 				return err
 			}
 
-			payload := map[string]any{"approved_by": by}
+			payload := map[string]any{}
 			fields := map[string]any{}
 			if planPath != "" {
 				edited, verr := vettedPlanFile(cfg, task, planPath)
@@ -758,7 +760,7 @@ func taskApproveCmd(opts *options) *cobra.Command {
 				payload["plan_edited"] = true
 			}
 
-			updated, err := st.Transition(task.ID, task.Version, state.Coding, payload, fields)
+			updated, err := issuegate.Approve(st, task, by, payload, fields)
 			if err != nil {
 				return err
 			}
@@ -794,7 +796,7 @@ func taskRejectCmd(opts *options) *cobra.Command {
 		Short: "驳回 M 级任务的计划（默认终态；--replan 退回规划重新生成）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, st, task, err := loadTask(cmd, opts)
+			cfg, st, task, err := loadTask(cmd, opts)
 			if err != nil {
 				return err
 			}
@@ -814,24 +816,17 @@ func taskRejectCmd(opts *options) *cobra.Command {
 				// 没有理由的驳回无法审计，也无法在 --replan 时告诉规划器哪里不行。
 				return fail(ExitUsage, "驳回必须给出理由（用 --reason 或 --file）")
 			}
-			if err := st.RecordInteraction(task.ID, "reject", reason); err != nil {
-				return err
+			updated, err := issuegate.Reject(st, task, by, reason, replan, nil)
+			if errors.Is(err, issuegate.ErrReasonRequired) {
+				return fail(ExitUsage, "驳回必须给出理由（用 --reason 或 --file）")
 			}
-			payload := map[string]any{
-				"rejected_by": by,
-				"reason":      truncateForEvent(reason),
-				"replan":      replan,
-			}
-			target := state.Rejected
-			fields := map[string]any{}
-			if replan {
-				target = state.Planning
-				// 与 reply 同构：理由并入需求文本，规划器下一轮能看到完整上下文。
-				fields["requirement"] = task.Requirement + "\n\n[审批驳回]\n" + reason
-			}
-			updated, err := st.Transition(task.ID, task.Version, target, payload, fields)
 			if err != nil {
 				return err
+			}
+			if !replan {
+				if perr := postIssueUpdate(cmd.Context(), st, cfg, updated, "final"); perr != nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "[WARN] Issue 回写失败: %v\n", perr)
+				}
 			}
 			out := cmd.OutOrStdout()
 			if replan {
@@ -1014,6 +1009,9 @@ func taskCancelCmd(opts *options) *cobra.Command {
 				map[string]any{"reason": orDash(reason)}, nil)
 			if err != nil {
 				return err
+			}
+			if perr := postIssueUpdate(cmd.Context(), st, cfg, updated, "final"); perr != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "[WARN] Issue 回写失败: %v\n", perr)
 			}
 
 			out := cmd.OutOrStdout()
@@ -1866,6 +1864,7 @@ func buildOrchestrator(cfg *config.App, st store.Repository, backendName, script
 	if push {
 		opts = append(opts, orchestrator.WithDelivery(true))
 	}
+	opts = append(opts, orchestrator.WithIssueCommenter(ghIssueClient{}))
 	return orchestrator.New(st, cfg, be, opts...), nil
 }
 

@@ -16,6 +16,7 @@ import (
 	"agentdev/internal/cost"
 	"agentdev/internal/delivery"
 	"agentdev/internal/forecast"
+	"agentdev/internal/issuegate"
 	"agentdev/internal/llm"
 	"agentdev/internal/planning"
 	"agentdev/internal/policy"
@@ -38,16 +39,17 @@ type Orchestrator struct {
 	ws      *workspace.Manager
 
 	// 模型相关（可选）。为 nil 时退化为纯规则 + 静态计划，可完全离线运行。
-	model     *llm.Client
-	modelName string
-	maxTokens int
-	pricing   cost.Table
-	planner   planning.Planner
-	reviewer  review.Reviewer
-	codeHost  delivery.CodeHost
-	ciWatcher delivery.CIWatcher
-	ciPoll    time.Duration
-	ciTimeout time.Duration
+	model         *llm.Client
+	modelName     string
+	maxTokens     int
+	pricing       cost.Table
+	planner       planning.Planner
+	reviewer      review.Reviewer
+	codeHost      delivery.CodeHost
+	issueComments issuegate.Commenter
+	ciWatcher     delivery.CIWatcher
+	ciPoll        time.Duration
+	ciTimeout     time.Duration
 	// ciNoneGrace 是“PR 上没有检查”需要持续多久才判定为无 CI。
 	// 刚创建的 PR 与没有 workflow 的 PR 在 gh 输出上无法区分（ADR-30）。
 	ciNoneGrace time.Duration
@@ -105,6 +107,11 @@ func WithCITiming(poll, timeout time.Duration) Option {
 // 这是为了区分“PR 刚创建、检查还没注册”与“仓库真的没有 CI”。
 func WithCINoneGrace(d time.Duration) Option {
 	return func(o *Orchestrator) { o.ciNoneGrace = d }
+}
+
+// WithIssueCommenter 在进入审批门和终态后回写来源 Issue。为 nil 时不回写。
+func WithIssueCommenter(c issuegate.Commenter) Option {
+	return func(o *Orchestrator) { o.issueComments = c }
 }
 
 // WithDelivery 强制开启推送与创建 PR，用于覆盖 delivery.enabled。
@@ -1332,7 +1339,30 @@ func (o *Orchestrator) checkBudget(taskID string) error {
 // ---- 辅助 ----
 
 func (o *Orchestrator) move(task store.Task, to state.Status, payload map[string]any, fields map[string]any) (store.Task, error) {
-	return o.store.Transition(task.ID, task.Version, to, payload, fields)
+	updated, err := o.store.Transition(task.ID, task.Version, to, payload, fields)
+	if err != nil {
+		return task, err
+	}
+	o.notifyIssue(updated)
+	return updated, nil
+}
+
+// notifyIssue 在状态已经转移之后回写。回写失败留在事件里，不把任务打回原状态。
+func (o *Orchestrator) notifyIssue(task store.Task) {
+	if o.issueComments == nil || o.cfg == nil || task.Source != "issue" {
+		return
+	}
+	kind := ""
+	switch task.Status {
+	case state.AwaitingApproval:
+		kind = "plan"
+	case state.Done, state.Rejected, state.Cancelled:
+		kind = "final"
+	default:
+		return
+	}
+	_ = issuegate.PostUpdate(context.Background(), o.store, o.issueComments, task,
+		o.cfg.Repos[task.Repo], o.cfg.Policy, kind)
 }
 
 // suspend 把任务挂起到 NEEDS_HUMAN，等待人工处理（resume）。
