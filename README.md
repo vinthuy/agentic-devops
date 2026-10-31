@@ -51,6 +51,8 @@ agentdev task status <task-id>
 agentdev task logs <task-id> [--limit N] [--json]   # 完整审计时间线
 agentdev cost <task-id>                       # 花费明细
 agentdev cost report                          # 全局成本看板
+agentdev cost report --repo owner/name --day 2026-10-31  # 按仓库和账本 UTC 日期筛选
+agentdev webhook                              # 需 AGENTDEV_WEBHOOK_SECRET，默认 127.0.0.1:8787
 agentdev bench --manifest bench/tasks.yaml    # 基准集：成功率/成本/修复轮数
 agentdev bench --manifest bench/tasks.yaml --ci-repo owner/name  # 接真实 CI，测 CI 首次通过率
 ```

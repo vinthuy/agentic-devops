@@ -103,6 +103,10 @@ CREATE TABLE IF NOT EXISTS locks (
     acquired_at  TEXT NOT NULL,
     heartbeat_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id          TEXT PRIMARY KEY,
+    received_at TEXT NOT NULL
+);
 `
 
 // 允许通过 Transition 更新的字段。
@@ -854,5 +858,23 @@ func (s *SQLiteStore) ListLocks() ([]Lock, error) {
 
 func (s *SQLiteStore) DeleteLock(resource string) error {
 	_, err := s.db.Exec(`DELETE FROM locks WHERE resource = ?`, resource)
+	return err
+}
+
+// ClaimDelivery 记下一条 Webhook 投递。已经见过时返回 false，调用方不得再次处理。
+func (s *SQLiteStore) ClaimDelivery(id string) (bool, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO webhook_deliveries (id, received_at) VALUES (?, ?) ON CONFLICT(id) DO NOTHING`,
+		id, now())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ForgetDelivery 去掉投递记录，让失败的请求可以重试。
+func (s *SQLiteStore) ForgetDelivery(id string) error {
+	_, err := s.db.Exec(`DELETE FROM webhook_deliveries WHERE id = ?`, id)
 	return err
 }

@@ -74,7 +74,7 @@ func NewRoot() *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.home, "home", "", "数据目录，默认读取 AGENTDEV_HOME 或 ~/.agentdev")
 
 	root.AddCommand(versionCmd(), configCmd(opts), doctorCmd(opts), taskCmd(opts), runCmd(opts),
-		sweepCmd(opts), costCmd(opts), benchCmd(opts))
+		sweepCmd(opts), webhookCmd(opts), costCmd(opts), benchCmd(opts))
 	return root
 }
 
@@ -1104,7 +1104,7 @@ func costCmd(opts *options) *cobra.Command {
 			return costTaskRun(cmd, opts, args[0])
 		},
 	}
-	cmd.AddCommand(&cobra.Command{Use: "report", Short: "查看所有任务的成本汇总看板", Args: cobra.NoArgs, RunE: costReportRun(opts)})
+	cmd.AddCommand(costReportCmd(opts))
 	cmd.AddCommand(costForecastCmd(opts))
 	return cmd
 }
@@ -1305,88 +1305,129 @@ type costAggregate struct {
 	Cost                 float64
 }
 
-func costReportRun(opts *options) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, _ []string) error {
-		cfg, err := loadConfig(opts)
-		if err != nil {
-			return err
-		}
-		st, err := openStore(cfg)
-		if err != nil {
-			return err
-		}
-		defer st.Close()
-		entries, err := st.ListAllCosts()
-		if err != nil {
-			return err
-		}
-		tasks, err := st.ListTasks("", "")
-		if err != nil {
-			return err
-		}
-		byRole, byModel := map[string]*costAggregate{}, map[string]*costAggregate{}
-		byTask := map[string]float64{}
-		var total float64
-		for _, e := range entries {
-			total += e.CostUSD
-			addCost(byRole, e.Role, e)
-			addCost(byModel, e.Model, e)
-			byTask[e.TaskID] += e.CostUSD
-		}
-		var missingPricing []string
-		for _, task := range tasks {
-			events, err := st.ListEvents(task.ID)
-			if err != nil {
-				return err
-			}
-			for _, event := range events {
-				if event.Type == "cost_pricing_missing" {
-					model, _ := event.Payload["model"].(string)
-					missingPricing = append(missingPricing, fmt.Sprintf("%s (%s)", task.ID, model))
-				}
-			}
-		}
-		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "成本看板：%d 个任务，%d 次模型调用，累计 $%.6f\n\n", len(tasks), len(entries), total)
-		if len(missingPricing) > 0 {
-			fmt.Fprintf(out, "[WARN] %d 个任务缺少模型单价，$0 计费不代表免费：%s\n\n",
-				len(missingPricing), strings.Join(missingPricing, ", "))
-		}
-		printCostAggregate(out, "按角色", byRole)
-		printCostAggregate(out, "按模型", byModel)
-		if len(byTask) > 0 {
-			fmt.Fprintln(out, "花费最高的任务：")
-			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "任务 ID\t仓库\t状态\t费用")
-			taskByID := make(map[string]store.Task, len(tasks))
-			for _, task := range tasks {
-				taskByID[task.ID] = task
-			}
-			type item struct {
-				id    string
-				spend float64
-			}
-			var ranked []item
-			for id, spend := range byTask {
-				ranked = append(ranked, item{id, spend})
-			}
-			sort.Slice(ranked, func(i, j int) bool { return ranked[i].spend > ranked[j].spend })
-			for i, it := range ranked {
-				if i == 10 {
-					break
-				}
-				t := taskByID[it.id]
-				fmt.Fprintf(w, "%s\t%s\t%s\t$%.6f\n", it.id, t.Repo, t.Status, it.spend)
-			}
-			if err := w.Flush(); err != nil {
-				return err
-			}
-		}
-		if len(entries) == 0 {
-			fmt.Fprintln(out, "\n没有模型调用记录；若使用了模型，请检查是否有 cost_pricing_missing 事件。")
-		}
-		return nil
+func costReportCmd(opts *options) *cobra.Command {
+	var repo, day string
+	cmd := &cobra.Command{
+		Use:   "report",
+		Short: "查看所有任务的成本汇总看板",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return costReportRun(cmd, opts, strings.TrimSpace(repo), strings.TrimSpace(day))
+		},
 	}
+	cmd.Flags().StringVar(&repo, "repo", "", "只统计该仓库，格式 owner/name")
+	cmd.Flags().StringVar(&day, "day", "", "只统计该 UTC 日期的账本，格式 YYYY-MM-DD")
+	return cmd
+}
+
+func costReportRun(cmd *cobra.Command, opts *options, repo, day string) error {
+	if day != "" {
+		if _, err := time.Parse("2006-01-02", day); err != nil {
+			return fail(ExitUsage, "--day 必须是 YYYY-MM-DD")
+		}
+	}
+	cfg, err := loadConfig(opts)
+	if err != nil {
+		return err
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	entries, err := st.ListAllCosts()
+	if err != nil {
+		return err
+	}
+	tasks, err := st.ListTasks("", "")
+	if err != nil {
+		return err
+	}
+	taskByID := make(map[string]store.Task, len(tasks))
+	for _, task := range tasks {
+		taskByID[task.ID] = task
+	}
+	if repo != "" || day != "" {
+		kept := entries[:0]
+		for _, e := range entries {
+			task, ok := taskByID[e.TaskID]
+			if repo != "" && (!ok || task.Repo != repo) {
+				continue
+			}
+			if day != "" && !strings.HasPrefix(e.TS, day) {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		entries = kept
+	}
+	byRole, byModel := map[string]*costAggregate{}, map[string]*costAggregate{}
+	byTask := map[string]float64{}
+	var total float64
+	for _, e := range entries {
+		total += e.CostUSD
+		addCost(byRole, e.Role, e)
+		addCost(byModel, e.Model, e)
+		byTask[e.TaskID] += e.CostUSD
+	}
+	taskCount := len(tasks)
+	if repo != "" || day != "" {
+		taskCount = len(byTask)
+	}
+	var missingPricing []string
+	for _, task := range tasks {
+		if repo != "" || day != "" {
+			if _, ok := byTask[task.ID]; !ok {
+				continue
+			}
+		}
+		events, err := st.ListEvents(task.ID)
+		if err != nil {
+			return err
+		}
+		for _, event := range events {
+			if event.Type == "cost_pricing_missing" {
+				model, _ := event.Payload["model"].(string)
+				missingPricing = append(missingPricing, fmt.Sprintf("%s (%s)", task.ID, model))
+			}
+		}
+	}
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "成本看板：%d 个任务，%d 次模型调用，累计 $%.6f\n\n", taskCount, len(entries), total)
+	if len(missingPricing) > 0 {
+		fmt.Fprintf(out, "[WARN] %d 个任务缺少模型单价，$0 计费不代表免费：%s\n\n",
+			len(missingPricing), strings.Join(missingPricing, ", "))
+	}
+	printCostAggregate(out, "按角色", byRole)
+	printCostAggregate(out, "按模型", byModel)
+	if len(byTask) > 0 {
+		fmt.Fprintln(out, "花费最高的任务：")
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "任务 ID\t仓库\t状态\t费用")
+		type item struct {
+			id    string
+			spend float64
+		}
+		var ranked []item
+		for id, spend := range byTask {
+			ranked = append(ranked, item{id, spend})
+		}
+		sort.Slice(ranked, func(i, j int) bool { return ranked[i].spend > ranked[j].spend })
+		for i, it := range ranked {
+			if i == 10 {
+				break
+			}
+			t := taskByID[it.id]
+			fmt.Fprintf(w, "%s\t%s\t%s\t$%.6f\n", it.id, t.Repo, t.Status, it.spend)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	if len(entries) == 0 {
+		fmt.Fprintln(out, "\n没有模型调用记录；若使用了模型，请检查是否有 cost_pricing_missing 事件。")
+	}
+	return nil
 }
 
 func addCost(groups map[string]*costAggregate, key string, e store.CostEntry) {

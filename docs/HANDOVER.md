@@ -49,16 +49,21 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 | **实现前提核查** | 需求对现有实现提主张（“`parse_port` 没处理空字符串”“改为按百万计价”）时，在非测试源码里查被点名符号，注入定义位置与命中行前后的带行号窗口（ADR-33）。在 `parse.py` 已有 `if not s: raise ValueError` 的仓库上实测：需求声称“没有校验空字符串”，两次运行都停在 `NEEDS_INFO` 并精确指出 `parse.py:9-10`（$0.0021、$0.0015，约 11 秒）；未含该功能的二进制只指出测试重复，未识别实现前提 |
 | **花费预测** | `agentdev cost forecast [--repo] [--level]` 按历史实际花费给出 P50/P90（ADR-32）；样本不足 5 条时拒绝给数字。计划阶段写 `cost_forecast` 事件，`--accuracy` 校准（SDD §5.10） |
 | **花费预测的真实校准** | 用 `bench --shared-home` 让基准用例共用数据目录累积样本：20 个真实用例里有 15 个记录了预测，实测 **11/15 = 73% 落在 P90 内**，低于名义 90%。根因是线性插值在小样本下位次偏低（第 k 个顺序统计量的期望覆盖率是 `k/(n+1)`），改用 `ceil((n+1)p)` 后新跑 7 个用例，**6/7 = 86%**；存储的 P90 与新算法精确吻合，确认走的是新代码（SDD §5.10） |
+| **Issue 评论与回写** | `vinthuy/agentdev-sandbox` Issue [#44](https://github.com/vinthuy/agentdev-sandbox/issues/44)：进入审批门后发出计划评论；`vinthuy` 的 `/approve` 经 `task sync-issue` 把任务从 `AWAITING_APPROVAL` 改成 `CODING`；取消后终态评论写明 `CANCELLED`。Issue 已关闭 |
+| **PR review 发表** | 草稿 PR [#45](https://github.com/vinthuy/agentdev-sandbox/pull/45) 上，`GHCli.PostReview` 按本地通过留下 `COMMENTED`。该次直接调用发表函数，没有走带模型的审查步骤。PR 已关闭，分支已删除 |
+| **Webhook** | `agentdev webhook` 校验 `X-Hub-Signature-256`，`agent-ready` 只入队，`/approve` 进入编码，重复投递不再转移。缺少 `AGENTDEV_WEBHOOK_SECRET` 时拒绝启动。不调用 `run` |
+| **成本报表筛选** | `agentdev cost report --repo owner/name --day YYYY-MM-DD` 按仓库和账本 UTC 日期筛选。表头的任务数、调用次数和金额跟筛选结果一致 |
+| **CI 额外发现** | `bench/ci_loop.yaml` 在 `vinthuy/agentdev-sandbox` 上跑 6 次（2026-10-31）：本地只跑 `test_core.py`，CI 另跑 `test_edges.py`。6 次交付都真正跑过 CI，**CI 首次通过率 0/6 = 0%**，也就是 6/6 次第一次 CI 发现了本地验证没挡住的问题。其中 5 次经一次 CI 回修后 `DONE`，1 次（`ci-loop-2`）停在 `NEEDS_HUMAN`。总花费 $0.1643，平均 $0.0274 |
 
 ## 3. 未验证（重要）
 
 | 项目 | 原因 | 需要什么 |
 |---|---|---|
-| M3 控制面（§24） | 评论审批、回写、审查写回、`sweep`、只读检索、角色模型、`AGENTS.md`、L 级拆段和 CI 差异基准已在当前 `master`。版本常量仍是 `0.13.0` | Webhook HTTP 服务和进程内定时器仍未做，不要把它们当成已有能力 |
+| 进程内定时器 | `agentdev webhook` 只在命令运行时监听。审批超时不会自己发生 | 仍用外部 cron 调 `agentdev sweep` |
 | 基准统计显著性 | 20 用例 × 1 次运行（成功率与 CI 首次通过率都是单样本） | `--repeat N` 多轮采样，或更多仓库 |
 | 前提核查的覆盖面 | 已覆盖“测试缺失”与“现有实现主张（带命名符号）”两类；且都依赖关键词触发，换个说法可能不触发 | 描述性前提（“登录流程在并发下会丢状态”）既定位不到符号也无从核查；需要模型驱动的只读检索工具 |
 | 花费预测的准确度 | 已测出 73%（线性插值）→ 86%（顺序统计量，7 个新样本），**但仍不能说已校准到名义 90%**：7 个点的 95% 置信区间约 42%～99%；且样本等于下限 5 时 P90 必然等于最大值 | 累积到 50 条以上真实样本后重跑 `cost forecast --accuracy` |
-| CI 的额外发现能力 | `bench/ci_loop_workflow.yml` 含本地不跑的 `test_edges.py`。本地通过且该检查失败时，结果不算 `ci_first_pass`。同一批命令的既有通过记录不改写 | 用该剧本在真实仓库上采样，才能得出额外发现率 |
+| CI 额外发现的稳定性 | 2026-10-31 的 6 次里有 1 次停在 `NEEDS_HUMAN`，没有留下失败原因的持久报告 | 要判断回修是否稳定，需要保留 `--keep` 或再采样 |
 | 非 ubuntu 的 Linux 发行版 | 仅覆盖 `ubuntu-latest` | 目标发行版或容器内复跑 |
 | Docker 隔离 | 你已明确不作为需求；默认使用受限本地进程 | 仅在需要 OS 级隔离时再排期 |
 

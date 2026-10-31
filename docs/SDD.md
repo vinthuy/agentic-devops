@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 |---|---|
 | 文档版本 | v0.3（当前实现基线） |
-| 状态 | 与 Go 代码对齐；Docker 为可选后端，不阻塞本地执行。§24 的控制面已在当前代码中；Webhook 与进程内定时器仍未做。版本常量仍是 `0.13.0` |
+| 状态 | 与 Go 代码对齐；Docker 为可选后端，不阻塞本地执行。§24 的控制面已在当前代码中。`agentdev webhook` 接收 GitHub 事件。进程内定时器仍未做。版本常量仍是 `0.13.0` |
 | 关联文档 | `docs/PRD.md`（需求依据，本文引用其 FR/US 编号） |
 | 日期 | 2026-10-18 |
 
@@ -943,7 +943,7 @@ agentic-devops/
 | M0 原型 | cli、config、workspace（基础）、backends（基础）、tools（fs/shell 基础） | 无正式 FR |
 | M1 MVP | 完整状态机（不含 REVIEWING、CI_WATCHING）、triage（规则+模型）、planning、verify（含防作弊）、delivery（commit/push/PR）、store、cost、policy（基础）、sandbox/process、report、doctor | FR-001–004、010–011、013、020–022、030–033、035、040–043、045、050、052、060–063、070–072 |
 | M2 增强（分批实施） | REVIEWING、CI_WATCHING、澄清问题、Issue 导入、成本报表、request_info；Docker 为可选隔离增强 | FR-005（完整）、012、023（可选 Docker）、024、025、034、046、051、053 |
-| M3 控制面（§24，已实现；Webhook 与进程内定时器除外） | 标签只表示接入、Issue 评论审批与完成回写、审查意见写回 PR、`sweep`、规划前只读检索、按角色选模型、`AGENTS.md`、L 级拆段、CI 差异基准 | FR-047、064、065、066、067、068、069、073、074、075 |
+| M3 控制面（§24，已实现；进程内定时器除外） | 标签只表示接入、Issue 评论审批与完成回写、审查意见写回 PR、`webhook`、`sweep`、规划前只读检索、按角色选模型、`AGENTS.md`、L 级拆段、CI 差异基准 | FR-047、064、065、066、067、068、069、073、074、075 |
 
 ---
 
@@ -1073,7 +1073,7 @@ stateDiagram-v2
 | 提示词 | `internal/*/prompts/*.md`（`go:embed`） | triage / planner / coder / reviewer 的 v1 版本 | 文件名带版本；修改后需通过相关单元与端到端测试 |
 | 事件目录 | §20.1 | 事件类型、发出位置、负载键、是否属于降级 | 新事件必须登记于此；降级类事件必须登记于 `degradationLabels` |
 | 运行产物 | `runs/<task>/report.md`、`events.jsonl`、`artifacts/` | 审计用报告、事件流、命令日志 | 报告章节由 `internal/report` 渲染，章节变化需报告测试 |
-| 决策记录 | §17（ADR-01 至 ADR-49） | 设计决策、备选方案与理由 | 已有 ADR 不得改写结论；推翻需新增 ADR 并注明取代关系。ADR-42 至 ADR-49 约束 §24；其中 Webhook 与进程内定时器仍未实现 |
+| 决策记录 | §17（ADR-01 至 ADR-49） | 设计决策、备选方案与理由 | 已有 ADR 不得改写结论；推翻需新增 ADR 并注明取代关系。ADR-42 至 ADR-49 约束 §24。`agentdev webhook` 已实现。进程内定时器仍未实现 |
 | 限制与待验证项 | §18 | 当前已知限制与线上验证缺口 | 缺口关闭时在同一提交中删除对应条目 |
 | 验收矩阵 | §21 | 每条验收标准、测试映射、状态 | 测试改名或删除时必须同步更新映射 |
 
@@ -1173,11 +1173,11 @@ stateDiagram-v2
 | AC-26 | FR-044 | 来自 Issue 的任务在 PR 正文注明来源 URL | `TestCommitMessageAndPRBodyContent` | 已覆盖 |
 | AC-27 | FR-045 | 推送前密钥扫描；命中则阻止推送并转人工 | `TestSecretScanBlocksPush`、`TestScanDiffFindsAddedSecrets`、`TestScanDiffFlagsSensitiveFileNames` | 已覆盖 |
 | AC-28 | FR-046 | CI 监听：通过完成；无 CI 明确记录；失败回修并受上限约束；超时挂起 | `TestCIPassedMarksDone`、`TestCINoneMarksDoneWithExplicitNote`、`TestCIFailedReturnsToCodingAndCounts`、`TestCIExceedingLimitSuspends`、`TestCIPendingTimesOut`、`TestGHCliChecksParsesFailuresAndFetchesLogs`、`TestGHCliChecksUnknownStateIsNotSuccess`；真实无 CI 见 PR #1 | 已覆盖：无 CI 路径已在真实 GitHub 验证；红 CI 回修仍仅 Fake/替身 |
-| AC-29 | FR-047、FR-073 | 来源为 Issue 的任务在审批门回写计划，终态回写 PR 链接和结果；回写失败保留原状态 | `TestPlanCommentFailureStaysAtTheGate`、`TestFinalCommentIncludesPRAndFailureKeepsDone`、`TestCollaboratorApproveLeavesTheGate`、`TestDuplicateApproveDoesNotTransitionAgain` | 已覆盖（替身）；真实 `gh` 评论待真实环境 |
+| AC-29 | FR-047、FR-073 | 来源为 Issue 的任务在审批门回写计划，终态回写 PR 链接和结果；回写失败保留原状态 | `TestPlanCommentFailureStaysAtTheGate`、`TestFinalCommentIncludesPRAndFailureKeepsDone`、`TestCollaboratorApproveLeavesTheGate`、`TestDuplicateApproveDoesNotTransitionAgain` | 已覆盖。Issue [#44](https://github.com/vinthuy/agentdev-sandbox/issues/44)：计划评论已发出；`vinthuy` 的 `/approve` 经 `sync-issue` 从 `AWAITING_APPROVAL` 到 `CODING`；取消后终态评论为 `CANCELLED`。回写失败保留状态仍由替身测试覆盖 |
 | AC-30 | FR-050 | 每次模型调用记录 token 与费用 | `TestTableComputesCostPerMillionTokens`、`TestUsageAddAndEmpty`、`TestListAllCostsIncludesTaskIDs` | 已覆盖 |
 | AC-31 | FR-051 | 任务前给出成本预估 | — | **未实现**（P2） |
 | AC-32 | FR-052 | 80% 记预警，100% 熔断并停止调用模型 | `TestBudgetWarningThenCircuitBreaker`、`TestRepoBudgetDefaultsToTwoDollars`、`TestErrBudgetExceededIsSentinel` | 已覆盖 |
-| AC-33 | FR-053 | 报表按任务、角色、模型汇总 | `TestCostReportAggregatesAcrossTasks` | 部分覆盖：按仓库、按日未实现 |
+| AC-33 | FR-053 | 报表按任务、角色、模型汇总，并可按仓库与 UTC 日期筛选 | `TestCostReportAggregatesAcrossTasks`、`TestCostReportFiltersByRepoAndDay` | 已覆盖。`--repo` 与 `--day` 只统计筛选后的调用；`--day` 使用账本时间的 UTC 日期 |
 | AC-34 | FR-060 | CLI 提供 create / list / status / logs / approve / reply / cancel / resume；`cancel` 回收 worktree 与分支 | `TestTaskListShowsCreated`、`TestTaskLogsShowsTimelineAndJSON`、`TestCancelStopsTaskAndFreesQueue`、`TestCancelRemovesWorktree`、`TestCancelKeepBranch`、`TestResumeFromNeedsHumanContinues` | 已覆盖（`logs` 支持 `--limit`、`--json`；`cancel` 支持 `--keep-branch`） |
 | AC-35 | FR-061 | 状态转换与关键事件入库，非法转换不改变状态 | `TestCreateTaskWritesQueuedAndEvent`、`TestTransitionUpdatesStatusVersionAndFields`、`TestInvalidTransitionRejectedAndStateUnchanged` | 已覆盖 |
 | AC-36 | FR-062 | 运行报告包含时间线、成本、降级、审查、CI 与提交审计 | `TestReportIncludesCostAndPR`、`TestReportRendersSourceAndDegradationProminently`、`TestReportShowsArtifactAuditAndReviewerDecision` | 已覆盖 |
@@ -1186,7 +1186,7 @@ stateDiagram-v2
 | AC-39 | FR-070 | `repos.yaml` 字段、默认值与校验；验证命令顺序保留 | `TestLoadRepoPreservesVerifyOrderAndDefaultsBranch`、`TestValidateRejectsEmptyVerifyAndBadBudget` | 已覆盖 |
 | AC-40 | FR-071 | `policy.yaml` 缺省使用内置默认；语法错误明确报告 | `TestLoadDefaultsWhenFilesMissing`、`TestInvalidYAMLReported` | 已覆盖 |
 | AC-41 | FR-072 | 单价按模型配置；未知模型显式报告，不当作免费 | `TestTableUnknownModelReturnsNotOK`、`TestUnknownPricingIsReportedNotSilentlyFree` | 已覆盖 |
-| AC-42 | FR-074 | 审查状态转移之后发表 PR review。打回为请求修改，通过为评论。没有 PR 或发表失败时本地结论不变 | `TestRequestChangesBecomesAReviewThatAsksForChanges`、`TestApproveBecomesAComment`、`TestNoPullRequestSkipsReviewPublication`、`TestReviewPublicationFailureKeepsLocalDecision` | 已覆盖（替身） |
+| AC-42 | FR-074 | 审查状态转移之后发表 PR review。打回为请求修改，通过为评论。没有 PR 或发表失败时本地结论不变 | `TestRequestChangesBecomesAReviewThatAsksForChanges`、`TestApproveBecomesAComment`、`TestNoPullRequestSkipsReviewPublication`、`TestReviewPublicationFailureKeepsLocalDecision` | 已覆盖。草稿 PR [#45](https://github.com/vinthuy/agentdev-sandbox/pull/45) 上，`GHCli.PostReview` 按本地通过留下 `COMMENTED`。该次直接调用发表函数，没有走带模型的审查步骤。状态不回滚仍由替身测试覆盖 |
 | AC-43 | FR-075 | `agentdev sweep` 与 `run` 共用到期处理；不创建任务；没有到期项时退出码为 0 | `TestSweepWithNothingExpiredExitsZero`、`TestSweepDoesNotStartQueuedTask`、`TestSweepEscalatesStaleApproval`、`TestExpirePendingReusesApprovalTimeout` | 已覆盖 |
 | AC-44 | FR-067 | 符号查找无命中时只读检索，受 8 次、单次 4000 字符、合计 16000 字符限制；越界和敏感路径被拒绝；无命中时待澄清 | `TestRetrieveObeysReadAndByteCaps`、`TestRetrieveRejectsEscapeAndSensitivePaths`、`TestRetrievalMissStopsForClarification` | 已覆盖 |
 | AC-45 | FR-068 | `models.yaml` 的 `roles` 未写的角色使用默认模型；缺单价仍告警，费用记在实际调用的模型名上 | `TestRoleModelFallsBackToDefault`、`TestUnsetRoleUsesDefaultModel`、`TestUnpricedRoleModelIsNamedInTheLedger` | 已覆盖 |
@@ -1194,6 +1194,7 @@ stateDiagram-v2
 | AC-47 | FR-066 | 批准第一段不创建或批准第二段；第一段被驳回后不再创建后续段；第一段完成后下一段自己停在审批门。父任务没有提交 | `TestApprovingTheFirstSliceDoesNotStartTheNext`、`TestRejectingTheFirstSliceCreatesNoNext`、`TestNextSliceWaitsUntilTheFirstIsDone` | 已覆盖 |
 | AC-48 | FR-065 | `agent-ready` 只表示可以接入，不批准、不进入编码 | `TestReadyLabelDoesNotEnterCoding` | 已覆盖 |
 | AC-49 | ADR-49 | 差异基准的 workflow 含本地验证不执行的检查。本地通过且该检查失败时不算 CI 首次通过。同一批命令的通过记录不变 | `TestDifferentialWorkflowHasACIOnlyCheck`、`TestLocalPassAndCIOnlyFailureIsNotFirstPass` | 已覆盖 |
+| AC-50 | FR-065 | `agentdev webhook` 校验 `X-Hub-Signature-256`。`agent-ready` 只入队一个未结束任务。`/approve` 进入编码。重复的 `X-GitHub-Delivery` 不再转移。缺少密钥时拒绝启动 | `TestBadSignatureLeavesTheTaskAlone`、`TestAgentReadyQueuesOneTaskAndDoesNotCode`、`TestApproveCommentEntersCodingAndDuplicateDeliveryDoesNot`、`TestOtherLabelDoesNotCreateATask`、`TestWebhookWithoutSecretExitsUsage` | 已覆盖。服务不调用 `run`。进程内定时器仍未做 |
 
 ### 21.3 安全验收
 
@@ -1239,7 +1240,7 @@ stateDiagram-v2
 |---|---|---|
 | M1 MVP | 所有 P0 FR 完成；基准集成功率 ≥ 60%；安全测试全部通过 | P0 缺口 G-01 至 G-05 已关闭；安全测试通过；6 个用例实测成功率 83%（≥60%）。但样本量未达 PRD 的 20 个，**尚不能认定为满足退出标准**（见 G-08） |
 | M2 增强 | Reviewer、CI 闭环、Issue 导入、成本看板、`request_info` 可用；基准集 CI 首次通过率 ≥ 50% | 功能均已实现，自动化测试通过；**CI 首次通过率未测量**，线上 PR/CI 闭环待真实环境验证 |
-| M3 控制面 | Issue 评论审批与回写、审查写回 PR、`sweep`、只读检索、角色模型、`AGENTS.md`、L 级拆段、CI 差异基准 | 上述行为有自动化测试。Webhook HTTP 服务与进程内定时器未做。`sweep` 不发出 `sweep_completed`（事件要求任务编号） |
+| M3 控制面 | Issue 评论审批与回写、审查写回 PR、`webhook`、`sweep`、只读检索、角色模型、`AGENTS.md`、L 级拆段、CI 差异基准、成本报表按仓库与日期筛选 | 上述行为有自动化测试。进程内定时器未做。`sweep` 不发出 `sweep_completed`（事件要求任务编号） |
 
 ### 21.7 未达标项与补齐计划
 
@@ -1973,7 +1974,7 @@ agentdev bench --manifest bench/ci_loop.yaml \
 ## 24. M3 控制面（已实现）
 
 本节描述当前代码里的控制面。版本常量仍是 `0.13.0`，没有单独发版。
-Webhook HTTP 服务和进程内定时器没有实现，见 §24.10。
+`agentdev webhook` 已实现。进程内定时器没有实现，见 §24.10。
 已经发出的事件登记在 §20.1。`sweep` 没有任务编号，因此没有 `sweep_completed`。
 与代码不一致时以代码为准。
 
@@ -2120,7 +2121,7 @@ roles:
 
 - 不自动合并 PR。
 - 不做 Web 管理后台，也不做 IDE 插件。
-- 不在进程内跑定时器或 Webhook HTTP 服务。Webhook 若要做，由外部接收后调用 CLI，权限与 `sweep` 相同，仍受 FR-064 约束。
+- 不在进程内跑定时器。审批超时仍由外部 cron 调用 `agentdev sweep`。`agentdev webhook` 只在命令运行期间监听 HTTP：校验签名后接入 `agent-ready` 或同步斜线评论，不调用 `run`，不绕过 FR-064 的并发上限。
 - 不把不同厂商的 API key 放进同一份角色配置。
 - 不允许 `AGENTS.md`、Issue 评论或标签关闭策略、预算或审批门。
 
