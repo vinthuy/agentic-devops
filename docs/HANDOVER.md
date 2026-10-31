@@ -53,7 +53,7 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 | **PR review 发表** | 草稿 PR [#45](https://github.com/vinthuy/agentdev-sandbox/pull/45) 上，`GHCli.PostReview` 按本地通过留下 `COMMENTED`。该次直接调用发表函数，没有走带模型的审查步骤。PR 已关闭，分支已删除 |
 | **Webhook** | `agentdev webhook` 校验 `X-Hub-Signature-256`，`agent-ready` 只入队，`/approve` 进入编码，重复投递不再转移。缺少 `AGENTDEV_WEBHOOK_SECRET` 时拒绝启动。不调用 `run` |
 | **成本报表筛选** | `agentdev cost report --repo owner/name --day YYYY-MM-DD` 按仓库和账本 UTC 日期筛选。表头的任务数、调用次数和金额跟筛选结果一致 |
-| **CI 额外发现** | `bench/ci_loop.yaml` 在 `vinthuy/agentdev-sandbox` 上跑 6 次（2026-10-31）：本地只跑 `test_core.py`，CI 另跑 `test_edges.py`。6 次交付都真正跑过 CI，**CI 首次通过率 0/6 = 0%**，也就是 6/6 次第一次 CI 发现了本地验证没挡住的问题。其中 5 次经一次 CI 回修后 `DONE`，1 次（`ci-loop-2`）停在 `NEEDS_HUMAN`。总花费 $0.1643，平均 $0.0274 |
+| **CI 额外发现** | `bench/ci_loop.yaml` 在 `vinthuy/agentdev-sandbox` 上跑 6 次（2026-10-31）：本地只跑 `test_core.py`，CI 另跑 `test_edges.py`。6 次交付都真正跑过 CI，**CI 首次通过率 0/6 = 0%**。其中 5 次经一次 CI 回修后 `DONE`，1 次（`ci-loop-2`）停在 `NEEDS_HUMAN`，该次报告未保留。总花费 $0.1643。同日用 `--keep` 重跑 `ci-loop-2`：`DONE`，花费 $0.0507。第一次 CI 的 `test` 失败，因为 `add(None, 1)` 抛出 `TypeError`、`bool` 被接受，而 `test_edges` 要求 `ValueError`；审查两次要求补上校验后，第二次 CI 通过。这次没有再停在 `NEEDS_HUMAN` |
 
 ## 3. 未验证（重要）
 
@@ -63,7 +63,7 @@ agentdev bench --manifest bench/tasks.yaml --shared-home DIR   # 样本跨用例
 | 基准统计显著性 | 20 用例 × 1 次运行（成功率与 CI 首次通过率都是单样本） | `--repeat N` 多轮采样，或更多仓库 |
 | 前提核查的覆盖面 | 已覆盖“测试缺失”与“现有实现主张（带命名符号）”两类；且都依赖关键词触发，换个说法可能不触发 | 描述性前提（“登录流程在并发下会丢状态”）既定位不到符号也无从核查；需要模型驱动的只读检索工具 |
 | 花费预测的准确度 | 已测出 73%（线性插值）→ 86%（顺序统计量，7 个新样本），**但仍不能说已校准到名义 90%**：7 个点的 95% 置信区间约 42%～99%；且样本等于下限 5 时 P90 必然等于最大值 | 累积到 50 条以上真实样本后重跑 `cost forecast --accuracy` |
-| CI 额外发现的稳定性 | 2026-10-31 的 6 次里有 1 次停在 `NEEDS_HUMAN`，没有留下失败原因的持久报告 | 要判断回修是否稳定，需要保留 `--keep` 或再采样 |
+| CI 回修停住的那一次 | 6 次里的 `ci-loop-2` 停在 `NEEDS_HUMAN`，报告已删除。`--keep` 重跑变成 `DONE`，没有复现停住 | 再出现 `NEEDS_HUMAN` 时用 `--keep` 留下当次报告 |
 | 非 ubuntu 的 Linux 发行版 | 仅覆盖 `ubuntu-latest` | 目标发行版或容器内复跑 |
 | Docker 隔离 | 你已明确不作为需求；默认使用受限本地进程 | 仅在需要 OS 级隔离时再排期 |
 
