@@ -80,9 +80,9 @@ agentdev bench --manifest bench/tasks.yaml --ci-repo owner/name  # 接真实 CI�
 ### 分级与人工介入
 
 - `--level` 缺省时自动分级：命中敏感区域/大范围改动的需求会升级为 M 或 L。
-  L 级直接拒绝，M 级停在 `AWAITING_APPROVAL`。
+  L 级拆成按顺序审批的 M 级子任务，父任务不编码；拆不开则停在 `NEEDS_HUMAN`。M 级停在 `AWAITING_APPROVAL`。
 - 需求信息不足时停在 `NEEDS_INFO` 并列出澄清问题。
-- GitHub Issue 正文按不可信输入包裹；自动导入只读取 Issue，不会自动关闭或评论 Issue。
+- GitHub Issue 正文按不可信输入包裹。自动导入只读取 Issue，不会关闭 Issue。来源是 Issue 的任务会在审批门回写计划，终态回写结果。评论不能绕过审批门。
 - 验证通过后 Reviewer 只因需求、正确性、安全或测试完整性问题打回，不因风格偏好阻塞。
 - CI 监听通过 `delivery.ci_watch: true` 显式开启；默认关闭。默认间隔 60 秒、超时 30 分钟、失败最多自动修复 2 次。
 - 需要人工介入的命令（退出码 3 表示需要人工处理）：

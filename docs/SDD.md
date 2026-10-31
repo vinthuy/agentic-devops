@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 |---|---|
 | 文档版本 | v0.3（当前实现基线） |
-| 状态 | 与 Go 代码对齐；Docker 为可选后端，不阻塞本地执行。§24 与其中 ADR-42 至 ADR-49 是尚未实现的 M3 设计 |
+| 状态 | 与 Go 代码对齐；Docker 为可选后端，不阻塞本地执行。§24 的控制面已在当前代码中；Webhook 与进程内定时器仍未做。版本常量仍是 `0.13.0` |
 | 关联文档 | `docs/PRD.md`（需求依据，本文引用其 FR/US 编号） |
 | 日期 | 2026-10-18 |
 
@@ -108,7 +108,7 @@
 |---|---|---|
 | `QUEUED` | 已创建，等待调度 | 否 |
 | `TRIAGING` | 分级中 | 否 |
-| `REJECTED` | 人工否决（L 级不执行，或 M 级审批被驳回） | 是 |
+| `REJECTED` | 人工否决（审批驳回，或某一拆分段被驳回） | 是 |
 | `PLANNING` | Planner 生成计划中 | 否 |
 | `NEEDS_INFO` | 等待用户回答澄清问题 | 否（挂起） |
 | `AWAITING_APPROVAL` | 等待用户审批（M 级） | 否（挂起） |
@@ -129,8 +129,9 @@
 | 当前状态 | 事件 | 目标状态 | 条件 / 动作 |
 |---|---|---|---|
 | QUEUED | 调度器拾取 | TRIAGING | 获取仓库锁 |
-| TRIAGING | 分级完成, L | REJECTED | 写入拒绝原因 |
-| TRIAGING | 分级完成, S/M | PLANNING | 保存分级来源；worktree 在计划就绪后创建 |
+| TRIAGING | 分级完成 | PLANNING | S/M/L 都进入规划。L 级不在分级时拒绝 |
+| PLANNING | L 级拆分通过 | NEEDS_HUMAN | 只创建第一段 M 级子任务并让它停在审批门；父任务原因是 `l_split`，没有工作区和提交 |
+| PLANNING | L 级拆分失败 | NEEDS_HUMAN | 原因为拆分失败，不创建进入编码的子任务 |
 | PLANNING | 计划生成, 需求模糊 | NEEDS_INFO | 保存澄清问题 |
 | PLANNING | 计划生成, M 级 | AWAITING_APPROVAL | 发送审批提示 |
 | PLANNING | 计划生成, S 级 | CODING | — |
@@ -942,7 +943,7 @@ agentic-devops/
 | M0 原型 | cli、config、workspace（基础）、backends（基础）、tools（fs/shell 基础） | 无正式 FR |
 | M1 MVP | 完整状态机（不含 REVIEWING、CI_WATCHING）、triage（规则+模型）、planning、verify（含防作弊）、delivery（commit/push/PR）、store、cost、policy（基础）、sandbox/process、report、doctor | FR-001–004、010–011、013、020–022、030–033、035、040–043、045、050、052、060–063、070–072 |
 | M2 增强（分批实施） | REVIEWING、CI_WATCHING、澄清问题、Issue 导入、成本报表、request_info；Docker 为可选隔离增强 | FR-005（完整）、012、023（可选 Docker）、024、025、034、046、051、053 |
-| M3 自动化（§24，未实现） | webhook/标签触发、并发调度、Issue 完成回写与评论审批、审查意见写回 PR、`sweep`、规划前只读检索、按角色选模型、`AGENTS.md`、L 级拆段 | FR-047、064、065、066、067、068、069、073、074、075 |
+| M3 控制面（§24，已实现；Webhook 与进程内定时器除外） | 标签只表示接入、Issue 评论审批与完成回写、审查意见写回 PR、`sweep`、规划前只读检索、按角色选模型、`AGENTS.md`、L 级拆段、CI 差异基准 | FR-047、064、065、066、067、068、069、073、074、075 |
 
 ---
 
@@ -1024,8 +1025,7 @@ agentic-devops/
 stateDiagram-v2
     [*] --> QUEUED
     QUEUED --> TRIAGING
-    TRIAGING --> REJECTED: L 级
-    TRIAGING --> PLANNING: S/M 级
+    TRIAGING --> PLANNING: S/M/L 级
     PLANNING --> NEEDS_INFO: 需求模糊
     NEEDS_INFO --> PLANNING: reply
     PLANNING --> AWAITING_APPROVAL: M 级
@@ -1073,7 +1073,7 @@ stateDiagram-v2
 | 提示词 | `internal/*/prompts/*.md`（`go:embed`） | triage / planner / coder / reviewer 的 v1 版本 | 文件名带版本；修改后需通过相关单元与端到端测试 |
 | 事件目录 | §20.1 | 事件类型、发出位置、负载键、是否属于降级 | 新事件必须登记于此；降级类事件必须登记于 `degradationLabels` |
 | 运行产物 | `runs/<task>/report.md`、`events.jsonl`、`artifacts/` | 审计用报告、事件流、命令日志 | 报告章节由 `internal/report` 渲染，章节变化需报告测试 |
-| 决策记录 | §17（ADR-01 至 ADR-49） | 设计决策、备选方案与理由 | 已有 ADR 不得改写结论；推翻需新增 ADR 并注明取代关系。ADR-42 至 ADR-49 只约束尚未实现的 §24 |
+| 决策记录 | §17（ADR-01 至 ADR-49） | 设计决策、备选方案与理由 | 已有 ADR 不得改写结论；推翻需新增 ADR 并注明取代关系。ADR-42 至 ADR-49 约束 §24；其中 Webhook 与进程内定时器仍未实现 |
 | 限制与待验证项 | §18 | 当前已知限制与线上验证缺口 | 缺口关闭时在同一提交中删除对应条目 |
 | 验收矩阵 | §21 | 每条验收标准、测试映射、状态 | 测试改名或删除时必须同步更新映射 |
 
@@ -1101,6 +1101,15 @@ stateDiagram-v2
 | `ci_failed` | CI 步骤 | `summary`、`checks` | CI 检查失败 | 是 |
 | `cost_pricing_missing` | 计费 | `model`、`note` | 缺单价，按 $0 计 | 是 |
 | `budget_warning` | 预算检查 | `spent_usd`、`budget_usd` | 花费达到 80% | 是 |
+| `github_command_applied` | `issuegate.Apply` | `comment_id`、`command`、`by` | 斜线命令已导致状态转移 | 否 |
+| `github_command_ignored` | `issuegate` | `comment_id`、`command`、`by`、`reason` | 无权限、状态不对、空理由、重复 id 或无法识别的命令 | 否 |
+| `github_comment_posted` | `issuegate.PostUpdate` | `comment_id`、`kind`（`plan` 或 `final`） | 计划通知或完成回写成功 | 否 |
+| `github_comment_failed` | `issuegate.PostUpdate` | `kind`、`error` | 回写失败；任务状态不回滚 | 否 |
+| `review_posted` | `orchestrator.publishReview` | `pr_url`、`decision` | 本地审查结论已写到草稿 PR | 否 |
+| `review_post_failed` | `orchestrator.publishReview` | `error` | PR review 发表失败；本地结论不回滚 | 否 |
+| `retrieval_completed` | 规划步骤 | `reads`、`bytes`、`hits` | 符号查找无命中后的只读检索结束 | 否 |
+| `l_split` | L 级拆段 | `child_task_id`、`slices`、`slice` | 父任务创建了一段 M 级子任务 | 否 |
+| `l_split_stopped` | L 级拆段 | `reason`、`child_task_id` 或 `error` | 拆分计划读不出，或上一段被拒绝后不再创建后续段 | 否 |
 
 > 策略违规不作为事件写入，而是写入 `policy_violations` 表，并在报告“策略违规”章节列出。
 
@@ -1138,7 +1147,7 @@ stateDiagram-v2
 | AC-01 | FR-001 | 需求来源 text/file/issue 有且仅有一个；未配置仓库被拒绝 | `TestTaskCreateRequiresExactlyOneSource`、`TestTaskCreateRejectsUnknownRepo` | 已覆盖 |
 | AC-02 | FR-002 | Issue 导入标题与正文；标记 `source=issue`、`trusted=false`，保存来源引用 | `TestTaskCreateImportsIssueAsUntrustedSource`、`TestGitHubRepoSlugParsing` | 已覆盖（使用替身读取）；真实 `gh issue view` 待真实环境 |
 | AC-03 | FR-003 | 规则分级优先；模型结果取更保守者；`--level` 显式覆盖 | `TestRulesClassifyBySignals`、`TestCombineTakesMoreConservativeLevel`、`TestParseLevel` | 已覆盖 |
-| AC-04 | FR-004 | L 级 REJECTED 且不调用后端；M 级停在 AWAITING_APPROVAL | `TestLevelLRejectedWithoutRunningBackend`、`TestLevelMParksForApproval` | 已覆盖 |
+| AC-04 | FR-004、FR-066 | L 级不进入编码。拆分未通过时进入 `NEEDS_HUMAN`，原因为拆分失败，且不调用后端；通过时只创建第一段 M 级子任务并停在审批门。M 级本身停在 `AWAITING_APPROVAL` | `TestLevelLWithoutASplitStopsForAHuman`、`TestInvalidSplitStopsWithoutAChild`、`TestLevelLCreatesOnlyTheFirstChild`、`TestLevelMParksForApproval` | 已覆盖 |
 | AC-05 | FR-013 | S 级无需审批；M 级审批前不进入编码 | `TestMLevelTaskRequiresApprovalThenRuns`、`TestApproveRejectsWrongState` | 已覆盖 |
 | AC-06 | FR-010 | 计划为结构化对象，通过 `Validate`，模型输出经强制工具调用解析 | `TestValidateAcceptsWellFormedPlan`、`TestModelPlannerParsesForcedToolCall`、`TestParseAndPromptText` | 已覆盖 |
 | AC-07 | FR-011 | 验收标准只接受 `test` / `command` / `file_exists` / `grep`；不安全选择器被拒绝；匹配不到测试的选择器被标记为不可执行并回到规划 | `TestValidateRejectsBadPlans`、`TestRunAllRejectsUnsafeSelector`、`TestRunAllMarksSelectorMatchingNoTestsAsInvalid`、`TestInvalidAcceptanceReplansWithFeedback`、`TestInvalidAcceptanceAfterReplanSuspends` | 已覆盖 |
@@ -1164,7 +1173,7 @@ stateDiagram-v2
 | AC-26 | FR-044 | 来自 Issue 的任务在 PR 正文注明来源 URL | `TestCommitMessageAndPRBodyContent` | 已覆盖 |
 | AC-27 | FR-045 | 推送前密钥扫描；命中则阻止推送并转人工 | `TestSecretScanBlocksPush`、`TestScanDiffFindsAddedSecrets`、`TestScanDiffFlagsSensitiveFileNames` | 已覆盖 |
 | AC-28 | FR-046 | CI 监听：通过完成；无 CI 明确记录；失败回修并受上限约束；超时挂起 | `TestCIPassedMarksDone`、`TestCINoneMarksDoneWithExplicitNote`、`TestCIFailedReturnsToCodingAndCounts`、`TestCIExceedingLimitSuspends`、`TestCIPendingTimesOut`、`TestGHCliChecksParsesFailuresAndFetchesLogs`、`TestGHCliChecksUnknownStateIsNotSuccess`；真实无 CI 见 PR #1 | 已覆盖：无 CI 路径已在真实 GitHub 验证；红 CI 回修仍仅 Fake/替身 |
-| AC-29 | FR-047 | 任务完成后回写 Issue 评论 | — | **未实现**（P2，M3） |
+| AC-29 | FR-047、FR-073 | 来源为 Issue 的任务在审批门回写计划，终态回写 PR 链接和结果；回写失败保留原状态 | `TestPlanCommentFailureStaysAtTheGate`、`TestFinalCommentIncludesPRAndFailureKeepsDone`、`TestCollaboratorApproveLeavesTheGate`、`TestDuplicateApproveDoesNotTransitionAgain` | 已覆盖（替身）；真实 `gh` 评论待真实环境 |
 | AC-30 | FR-050 | 每次模型调用记录 token 与费用 | `TestTableComputesCostPerMillionTokens`、`TestUsageAddAndEmpty`、`TestListAllCostsIncludesTaskIDs` | 已覆盖 |
 | AC-31 | FR-051 | 任务前给出成本预估 | — | **未实现**（P2） |
 | AC-32 | FR-052 | 80% 记预警，100% 熔断并停止调用模型 | `TestBudgetWarningThenCircuitBreaker`、`TestRepoBudgetDefaultsToTwoDollars`、`TestErrBudgetExceededIsSentinel` | 已覆盖 |
@@ -1177,6 +1186,14 @@ stateDiagram-v2
 | AC-39 | FR-070 | `repos.yaml` 字段、默认值与校验；验证命令顺序保留 | `TestLoadRepoPreservesVerifyOrderAndDefaultsBranch`、`TestValidateRejectsEmptyVerifyAndBadBudget` | 已覆盖 |
 | AC-40 | FR-071 | `policy.yaml` 缺省使用内置默认；语法错误明确报告 | `TestLoadDefaultsWhenFilesMissing`、`TestInvalidYAMLReported` | 已覆盖 |
 | AC-41 | FR-072 | 单价按模型配置；未知模型显式报告，不当作免费 | `TestTableUnknownModelReturnsNotOK`、`TestUnknownPricingIsReportedNotSilentlyFree` | 已覆盖 |
+| AC-42 | FR-074 | 审查状态转移之后发表 PR review。打回为请求修改，通过为评论。没有 PR 或发表失败时本地结论不变 | `TestRequestChangesBecomesAReviewThatAsksForChanges`、`TestApproveBecomesAComment`、`TestNoPullRequestSkipsReviewPublication`、`TestReviewPublicationFailureKeepsLocalDecision` | 已覆盖（替身） |
+| AC-43 | FR-075 | `agentdev sweep` 与 `run` 共用到期处理；不创建任务；没有到期项时退出码为 0 | `TestSweepWithNothingExpiredExitsZero`、`TestSweepDoesNotStartQueuedTask`、`TestSweepEscalatesStaleApproval`、`TestExpirePendingReusesApprovalTimeout` | 已覆盖 |
+| AC-44 | FR-067 | 符号查找无命中时只读检索，受 8 次、单次 4000 字符、合计 16000 字符限制；越界和敏感路径被拒绝；无命中时待澄清 | `TestRetrieveObeysReadAndByteCaps`、`TestRetrieveRejectsEscapeAndSensitivePaths`、`TestRetrievalMissStopsForClarification` | 已覆盖 |
+| AC-45 | FR-068 | `models.yaml` 的 `roles` 未写的角色使用默认模型；缺单价仍告警，费用记在实际调用的模型名上 | `TestRoleModelFallsBackToDefault`、`TestUnsetRoleUsesDefaultModel`、`TestUnpricedRoleModelIsNamedInTheLedger` | 已覆盖 |
+| AC-46 | FR-069 | 根目录 `AGENTS.md` 注入规划与审查。缺失不报错，超长截断，文字不能放宽禁止路径 | `TestMissingAgentsFileIsSkipped`、`TestLongAgentsFileKeepsThePrefix`、`TestAgentsFileCannotRelaxDenyPath`、`TestAgentsMDReachesThePlanner`、`TestReviewerSeesAgentsFileAsUntrusted` | 已覆盖 |
+| AC-47 | FR-066 | 批准第一段不创建或批准第二段；第一段被驳回后不再创建后续段；第一段完成后下一段自己停在审批门。父任务没有提交 | `TestApprovingTheFirstSliceDoesNotStartTheNext`、`TestRejectingTheFirstSliceCreatesNoNext`、`TestNextSliceWaitsUntilTheFirstIsDone` | 已覆盖 |
+| AC-48 | FR-065 | `agent-ready` 只表示可以接入，不批准、不进入编码 | `TestReadyLabelDoesNotEnterCoding` | 已覆盖 |
+| AC-49 | ADR-49 | 差异基准的 workflow 含本地验证不执行的检查。本地通过且该检查失败时不算 CI 首次通过。同一批命令的通过记录不变 | `TestDifferentialWorkflowHasACIOnlyCheck`、`TestLocalPassAndCIOnlyFailureIsNotFirstPass` | 已覆盖 |
 
 ### 21.3 安全验收
 
@@ -1199,7 +1216,7 @@ stateDiagram-v2
 | REL-01 | 版本号不匹配的并发转换被拒绝 | `TestStaleVersionIsConcurrentModification` | 已覆盖 |
 | REL-02 | 非法转换不改变任务状态 | `TestInvalidTransitionRejectedAndStateUnchanged` | 已覆盖 |
 | REL-03 | SQLite 以 WAL 模式运行 | `TestWALModeEnabled` | 已覆盖 |
-| REL-04 | 既有数据库可幂等补列，重复打开不失败 | `TestOpenMigratesReviewAttemptsColumn` | 已覆盖 |
+| REL-04 | 既有数据库可幂等补列，重复打开不失败 | `TestOpenMigratesReviewAttemptsColumn`、`TestOpenMigratesParentTaskID` | 已覆盖 |
 | REL-05 | 端点不支持强制 `tool_choice` 时自动降级，并记住能力 | `TestMessagesFallsBackWhenToolChoiceUnsupported`、`TestAPIErrorUnsupportedToolChoice` | 已覆盖 |
 | REL-06 | 限流与 5xx 退避重试；其他 4xx 不重试 | `TestAnthropicRetriesOnRateLimit`、`TestMessagesRetriesOnServerError`、`TestMessagesDoesNotRetryClientError` | 已覆盖 |
 | REL-07 | 提交后远端不存在时挂起，保留本地提交 | `TestMissingRemoteSuspendsAfterCommit` | 已覆盖 |
@@ -1222,7 +1239,7 @@ stateDiagram-v2
 |---|---|---|
 | M1 MVP | 所有 P0 FR 完成；基准集成功率 ≥ 60%；安全测试全部通过 | P0 缺口 G-01 至 G-05 已关闭；安全测试通过；6 个用例实测成功率 83%（≥60%）。但样本量未达 PRD 的 20 个，**尚不能认定为满足退出标准**（见 G-08） |
 | M2 增强 | Reviewer、CI 闭环、Issue 导入、成本看板、`request_info` 可用；基准集 CI 首次通过率 ≥ 50% | 功能均已实现，自动化测试通过；**CI 首次通过率未测量**，线上 PR/CI 闭环待真实环境验证 |
-| M3 自动化 | Webhook/标签触发、多任务并发、Issue 回写、定时任务 | 未开始（FR-047、FR-064、FR-065 属于此阶段） |
+| M3 控制面 | Issue 评论审批与回写、审查写回 PR、`sweep`、只读检索、角色模型、`AGENTS.md`、L 级拆段、CI 差异基准 | 上述行为有自动化测试。Webhook HTTP 服务与进程内定时器未做。`sweep` 不发出 `sweep_completed`（事件要求任务编号） |
 
 ### 21.7 未达标项与补齐计划
 
@@ -1953,11 +1970,12 @@ agentdev bench --manifest bench/ci_loop.yaml \
 
 ---
 
-## 24. M3 设计（未实现）
+## 24. M3 控制面（已实现）
 
-本节是设计，不是当前行为。代码版本 `v0.13.0` 没有这些命令、状态转移和配置字段。
-实现提交必须同步改掉本节的「未实现」声明，并把真正发出的事件补进 §20.1。
-在此之前，与代码不一致时以代码为准。
+本节描述当前代码里的控制面。版本常量仍是 `0.13.0`，没有单独发版。
+Webhook HTTP 服务和进程内定时器没有实现，见 §24.10。
+已经发出的事件登记在 §20.1。`sweep` 没有任务编号，因此没有 `sweep_completed`。
+与代码不一致时以代码为准。
 
 需求编号见 PRD：FR-047、FR-064、FR-065、FR-066、FR-067、FR-068、FR-069、FR-073、FR-074、FR-075。
 决策见 ADR-42 至 ADR-49。
@@ -1974,7 +1992,7 @@ agentdev bench --manifest bench/ci_loop.yaml \
 | 规划前只读检索 | FR-067 | 前提核查只会按符号名查找（ADR-31、ADR-33） | 规划阶段不能写文件、不能跑命令 |
 | 按角色选模型 | FR-068 | 全角色共用 `models.yaml` 的一个 `model` | 缺单价不得按 $0 静默记账 |
 | `AGENTS.md` | FR-069 | 策略在 `policy.yaml`，提示词在二进制内 | 文件内容不能放宽策略或预算 |
-| L 级拆段 | FR-066 | L 级现在拒绝编码（FR-004） | 不一次批准全部段落，父任务不编码 |
+| L 级拆段 | FR-066 | 父任务不进入编码；拆不开则待人工 | 不一次批准全部段落，父任务不编码 |
 | CI 额外检查的基准 | ADR-49 | §22.6 的 CI 与本地命令相同 | 不改变用户仓库自己的 workflow |
 
 并发上限仍是 FR-064：接入和 `sweep` 只入队或只做到期处理，不绕过同时运行的任务数。
@@ -2092,21 +2110,11 @@ roles:
 
 §22.6 已有的「同一批命令」结果保持原样，不改写成更强的结论。
 
-### 24.9 计划中的事件
+### 24.9 事件
 
-这些事件在实现前不写入 §20.1。
-
-| 事件 | 何时 | 负载 |
-|---|---|---|
-| `github_command_applied` | 斜线命令导致状态转移 | `comment_id`、`command`、`by` |
-| `github_command_ignored` | 无权限、状态不对、空理由、重复 id | `comment_id`、`reason` |
-| `github_comment_posted` | 计划通知或 FR-047 完成回写成功 | `comment_id`、`kind`（`plan` 或 `final`） |
-| `github_comment_failed` | 回写失败 | `kind`、`error` |
-| `review_posted` | PR review 发表成功 | `pr_url`、`decision` |
-| `review_post_failed` | PR review 发表失败 | `error` |
-| `sweep_completed` | `sweep` 结束 | `expired_approvals`、`expired_locks` |
-| `retrieval_completed` | 规划前检索结束 | `reads`、`bytes`、`hits` |
-| `l_split` | 父任务创建第一段子任务 | `child_task_id`、`slices` |
+`github_command_applied`、`github_command_ignored`、`github_comment_posted`、`github_comment_failed`、`review_posted`、`review_post_failed`、`retrieval_completed`、`l_split` 和 `l_split_stopped` 已由代码发出，并登记在 §20.1。
+`l_split_stopped` 表示拆分计划无法读取，或上一段被拒绝、取消后不再创建后续段。
+`sweep_completed` 没有实现。`sweep` 不归属某一个任务，而事件写入要求任务编号。
 
 ### 24.10 这一批明确不做
 
